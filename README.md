@@ -18,7 +18,7 @@ Add to your Zed `settings.json` (open with `cmd+,` or `ctrl+,`):
   "agent_servers": {
     "Amp": {
       "command": "npx",
-      "args": ["-y", "amp-acp"],
+      "args": ["-y", "@edlsh/amp-acp"],
       "env": {
         "AMP_EXECUTABLE": "path of AMP bin",
         "AMP_PREFER_SYSTEM_PATH": "1"
