@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**amp-acp** is a Node.js adapter that bridges [Amp CLI](https://ampcode.com) to the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/), enabling Amp to work with ACP-compatible clients like [Zed](https://zed.dev).
+**@edlsh/amp-acp** is a Node.js adapter that bridges [Amp CLI](https://ampcode.com) to the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/), enabling Amp to work with ACP-compatible clients like [Zed](https://zed.dev).
 
 ## Tech Stack
 

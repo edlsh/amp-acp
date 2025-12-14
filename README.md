@@ -1,6 +1,6 @@
 # ACP adapter for AmpCode
 
-![Screenshot](img/screenshot.png)
+![Screenshot](https://github.com/edlsh/amp-acp/raw/main/img/screenshot.png)
 
 Use [Amp](https://ampcode.com) from [ACP](https://agentclientprotocol.com/)-compatible clients such as [Zed](https://zed.dev).
 
@@ -11,24 +11,29 @@ Use [Amp](https://ampcode.com) from [ACP](https://agentclientprotocol.com/)-comp
 
 ## Installation
 
-Add to your Zed `settings.json` (open with `cmd+,` or `ctrl+,`):
+1. Find your Amp CLI path:
+   ```bash
+   which amp
+   # Example output: /usr/local/bin/amp
+   ```
 
-```json
-{
-  "agent_servers": {
-    "Amp": {
-      "command": "npx",
-      "args": ["-y", "@edlsh/amp-acp"],
-      "env": {
-        "AMP_EXECUTABLE": "path of AMP bin",
-        "AMP_PREFER_SYSTEM_PATH": "1"
-      }
-    }
-  }
-}
-```
+2. Add to your Zed `settings.json` (open with `cmd+,` or `ctrl+,`):
 
-Replace `"path of AMP bin"` with your Amp CLI path (e.g., `/usr/local/bin/amp`).
+   ```json
+   {
+     "agent_servers": {
+       "Amp": {
+         "command": "npx",
+         "args": ["-y", "@edlsh/amp-acp"],
+         "env": {
+           "AMP_EXECUTABLE": "/usr/local/bin/amp",
+           "AMP_PREFER_SYSTEM_PATH": "1"
+         }
+       }
+     }
+   }
+   ```
+   *Replace `/usr/local/bin/amp` with the path from step 1.*
 
 ## How it Works
 
@@ -54,3 +59,11 @@ Replace `"path of AMP bin"` with your Amp CLI path (e.g., `/usr/local/bin/amp`).
 1. Open Zed's ACP logs: `dev: open acp logs` from command palette
 2. Verify `available_commands_update` notification appears after `session/new` response
 3. Ensure you're using amp-acp v0.2.1+ which fixes the notification ordering issue
+
+## Known Limitations
+
+- **Oracle & Librarian**: These tools are currently experimental in Amp and may not render perfectly in ACP clients. Their output is displayed inline, but interactive features or deep linking might be limited compared to the native Amp TUI because they are server-rendered tool calls rather than client-local interactions.
+
+## Credits
+
+Forked from [tao12345666333/amp-acp](https://github.com/tao12345666333/amp-acp).
