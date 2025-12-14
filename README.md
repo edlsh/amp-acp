@@ -24,7 +24,7 @@ Use [Amp](https://ampcode.com) from [ACP](https://agentclientprotocol.com/)-comp
      "agent_servers": {
        "Amp": {
          "command": "npx",
-         "args": ["-y", "@edlsh/amp-acp"],
+         "args": ["-y", "@edlsh/amp-acp@latest"],
          "env": {
            "AMP_EXECUTABLE": "/usr/local/bin/amp",
            "AMP_PREFER_SYSTEM_PATH": "1"
