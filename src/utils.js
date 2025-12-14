@@ -4,9 +4,15 @@ export function nodeToWebWritable(nodeStream) {
   return new WritableStream({
     write(chunk) {
       return new Promise((resolve, reject) => {
-        nodeStream.write(Buffer.from(chunk), (err) => {
-          if (err) reject(err); else resolve();
+        const canContinue = nodeStream.write(Buffer.from(chunk), (err) => {
+          if (err) reject(err);
         });
+        if (canContinue) {
+          resolve();
+        } else {
+          // Backpressure: wait for drain before resolving
+          nodeStream.once('drain', resolve);
+        }
       });
     },
   });
@@ -22,6 +28,4 @@ export function nodeToWebReadable(nodeStream) {
   });
 }
 
-export function unreachable(x) {
-  throw new Error(`unreachable: ${JSON.stringify(x)}`);
-}
+

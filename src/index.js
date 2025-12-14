@@ -1,9 +1,14 @@
 #!/usr/bin/env node
-// stdout is reserved for ACP stream. Redirect logs to stderr.
-console.log = console.error;
-console.info = console.error;
-console.warn = console.error;
-console.debug = console.error;
+import { rootLog } from './logger.js';
+
+// Global error handlers to prevent silent crashes
+process.on('unhandledRejection', (reason) => {
+  rootLog.error('Unhandled rejection', { reason: String(reason) });
+});
+
+process.on('uncaughtException', (err) => {
+  rootLog.error('Uncaught exception', { error: err.message, stack: err.stack });
+});
 
 import { runAcp } from './run-acp.js';
 
