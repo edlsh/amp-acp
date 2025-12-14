@@ -1,0 +1,6 @@
+# Ignore research/handoff documents
+RESEARCH-HANDOFF-THREADS.md
+
+# Ignore local config
+.npmrc
+.env
