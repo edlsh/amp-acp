@@ -2,7 +2,6 @@ import { AgentSideConnection, ndJsonStream } from '@agentclientprotocol/sdk';
 import { nodeToWebReadable, nodeToWebWritable } from './utils.js';
 import { AmpAcpAgent } from './server.js';
 import { createLogger } from './logger.js';
-import fs from 'node:fs';
 
 const log = createLogger('acp:conn');
 const protocolLog = createLogger('acp:wire');

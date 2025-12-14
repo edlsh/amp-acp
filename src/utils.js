@@ -25,6 +25,9 @@ export function nodeToWebReadable(nodeStream) {
       nodeStream.on('end', () => controller.close());
       nodeStream.on('error', (err) => controller.error(err));
     },
+    cancel(reason) {
+      nodeStream.destroy(reason instanceof Error ? reason : undefined);
+    },
   });
 }
 

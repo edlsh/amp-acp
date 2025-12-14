@@ -1,9 +1,12 @@
 import { RequestError } from '@agentclientprotocol/sdk';
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import readline from 'node:readline';
 import { toAcpNotifications, isBashToolUse, getToolResult, NestedToolTracker } from './to-acp.js';
-import { config, buildSpawnEnv, slashCommands } from './config.js';
-import { execFile } from 'node:child_process';
+import { config, buildSpawnEnv, slashCommands, getAmpSettingsOverridesForMode } from './config.js';
 import { createLogger } from './logger.js';
 
 const logSession = createLogger('acp:session');
@@ -236,6 +239,9 @@ export class AmpAcpAgent {
     s.activeToolCalls.clear();
     s.nestedTracker.clear();
 
+    const cwd = params.cwd || process.cwd();
+    let ampSettingsFile = null;
+
     // Self-healing fallback: emit commands if not yet sent
     if (!s.sentAvailableCommands) {
       this._emitAvailableCommands(params.sessionId);
@@ -271,6 +277,8 @@ export class AmpAcpAgent {
       }
     }
 
+    ampSettingsFile = await this._createAmpSettingsFileForMode(cwd, s.currentModeId);
+
     // Create AbortController for this prompt, linked to connection signal
     const abortController = new AbortController();
     // Await the deferred signal promise (resolves after connection is fully initialized)
@@ -287,15 +295,21 @@ export class AmpAcpAgent {
       ? ['threads', 'continue', s.threadId, ...config.ampContinueFlags]
       : config.ampFlags;
 
+    const finalSpawnArgs = ampSettingsFile
+      ? [...spawnArgs, '--settings-file', ampSettingsFile]
+      : spawnArgs;
+
     logSpawn.debug('Spawning amp process', {
       sessionId: params.sessionId,
       threadId: s.threadId,
       useThreadContinue,
-      cwd: params.cwd || process.cwd(),
+      cwd,
+      modeId: s.currentModeId,
+      ampSettingsFile,
     });
 
-    const proc = spawn(config.ampExecutable, spawnArgs, {
-      cwd: params.cwd || process.cwd(),
+    const proc = spawn(config.ampExecutable, finalSpawnArgs, {
+      cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: buildSpawnEnv(),
     });
@@ -406,21 +420,32 @@ export class AmpAcpAgent {
     proc.stdin.write(textInput);
     proc.stdin.end();
 
+    // Timer reference for cleanup
+    let timeoutTimer = null;
+    const clearTimeoutTimer = () => {
+      if (timeoutTimer) {
+        clearTimeout(timeoutTimer);
+        timeoutTimer = null;
+      }
+    };
+
     try {
       const result = await Promise.race([
         new Promise((resolve) => {
           proc.on('close', (code, signal) => {
             procEnded = true;
+            clearTimeoutTimer();
             safeClose(rlOut);
             safeClose(rlErr);
             s.chain.then(() => resolve({ type: 'closed', code, signal }));
           });
         }),
         new Promise((resolve) => {
-          setTimeout(() => resolve({ type: 'timeout' }), config.timeoutMs);
+          timeoutTimer = setTimeout(() => resolve({ type: 'timeout' }), config.timeoutMs);
         }),
         new Promise((resolve) => {
           abortController.signal.addEventListener('abort', () => {
+            clearTimeoutTimer();
             resolve({ type: 'connection_closed' });
           });
         }),
@@ -433,6 +458,7 @@ export class AmpAcpAgent {
         safeClose(rlErr);
         // Wait for queued event processing to complete before returning
         await s.chain;
+        this._cleanupSession(params.sessionId);
         return { stopReason: 'cancelled' };
       }
 
@@ -468,6 +494,44 @@ export class AmpAcpAgent {
       s.cancelled = false;
       s.proc = null;
       s.rl = null;
+
+      if (ampSettingsFile) {
+        try {
+          await fs.unlink(ampSettingsFile);
+        } catch {}
+      }
+    }
+  }
+
+  async _createAmpSettingsFileForMode(cwd, modeId) {
+    const overrides = getAmpSettingsOverridesForMode(modeId);
+
+    // Preserve existing global + workspace settings while enforcing the selected mode.
+    const baseSettings = {
+      ...(await readJsonFile(getDefaultAmpSettingsPath())),
+      ...(await readJsonFile(path.join(cwd, '.amp', 'settings.json'))),
+    };
+
+    const merged = { ...baseSettings };
+    merged['amp.dangerouslyAllowAll'] = overrides.dangerouslyAllowAll;
+
+    if (Array.isArray(overrides.prependPermissions) && overrides.prependPermissions.length > 0) {
+      const existing = Array.isArray(merged['amp.permissions']) ? merged['amp.permissions'] : [];
+      merged['amp.permissions'] = [...overrides.prependPermissions, ...existing];
+    }
+
+    if (Array.isArray(overrides.disableTools) && overrides.disableTools.length > 0) {
+      const existing = Array.isArray(merged['amp.tools.disable']) ? merged['amp.tools.disable'] : [];
+      merged['amp.tools.disable'] = uniqStrings([...existing, ...overrides.disableTools]);
+    }
+
+    const tmpPath = path.join(os.tmpdir(), `amp-acp-settings-${modeId}-${randomUUID()}.json`);
+    try {
+      await fs.writeFile(tmpPath, JSON.stringify(merged, null, 2), 'utf8');
+      return tmpPath;
+    } catch (e) {
+      logSpawn.warn('Failed to write temp Amp settings file', { modeId, tmpPath, error: e.message });
+      return null;
     }
   }
 
@@ -502,6 +566,9 @@ export class AmpAcpAgent {
         status: t.status === 'completed' ? 'completed' : t.status === 'in-progress' ? 'in_progress' : 'pending',
         priority: 'medium',
       }));
+      this._emitPlanUpdate(sessionId, session);
+    } else if (chunk.name === 'todo_read') {
+      // Emit current plan state when Amp reads todos
       this._emitPlanUpdate(sessionId, session);
     }
   }
@@ -569,6 +636,53 @@ export class AmpAcpAgent {
 
   async readTextFile(params) { return this.client.readTextFile(params); }
   async writeTextFile(params) { return this.client.writeTextFile(params); }
+
+  _cleanupSession(sessionId) {
+    const s = this.sessions.get(sessionId);
+    if (!s) return;
+    for (const terminal of s.terminals.values()) {
+      try { terminal.release(); } catch {}
+    }
+    s.terminals.clear();
+    s.nestedTracker.clear();
+    this.sessions.delete(sessionId);
+    logSession.debug('Session cleaned up', { sessionId });
+  }
+}
+
+function getDefaultAmpSettingsPath() {
+  // Environment variable takes precedence, mirroring `amp --settings-file` default resolution.
+  if (process.env.AMP_SETTINGS_FILE) return process.env.AMP_SETTINGS_FILE;
+  const home = os.homedir?.() || process.env.HOME;
+  if (!home) return null;
+  return path.join(home, '.config', 'amp', 'settings.json');
+}
+
+async function readJsonFile(filePath) {
+  if (!filePath) return {};
+  try {
+    const raw = await fs.readFile(filePath, 'utf8');
+    if (!raw.trim()) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (e) {
+    if (e?.code !== 'ENOENT') {
+      logSpawn.warn('Failed to read Amp settings file', { filePath, error: e.message });
+    }
+    return {};
+  }
+}
+
+function uniqStrings(values) {
+  const out = [];
+  const seen = new Set();
+  for (const v of values) {
+    if (typeof v !== 'string') continue;
+    if (seen.has(v)) continue;
+    seen.add(v);
+    out.push(v);
+  }
+  return out;
 }
 
 function safeClose(rl) {

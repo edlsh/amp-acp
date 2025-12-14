@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Inline nested tool display now uses consolidated progress cards with dynamic updates
+- Parent tool cards show full child tool status list that updates in real-time
+- Progress summary shows: running/completed/failed counts (e.g., "2 running, 3 done (3/5)")
+- Child tools displayed in execution order with status icons (◐ running, ✓ done, ✗ failed)
+
 ## [0.2.4] - 2025-12-14
 
 ## [0.2.3] - 2025-12-14
