@@ -20,7 +20,7 @@ export const config = {
   protocolVersion: 1,
 
   // Nested tool call display mode:
-  // - 'inline': embed child tool calls as text in parent's content (default, best for Zed)
+  // - 'inline': embed child tool calls as consolidated progress in parent's content (default)
   // - 'separate': emit child tool calls as separate ACP tool_call notifications
   nestedToolMode: process.env.AMP_ACP_NESTED_MODE || 'inline',
 
@@ -29,8 +29,6 @@ export const config = {
     plan: 'plan',
     code: 'default',
     yolo: 'bypassPermissions',
-    ask: 'default',
-    architect: 'plan',
   },
 };
 
@@ -39,15 +37,15 @@ export const slashCommands = [
   { name: 'plan', description: 'Switch to plan mode (read-only analysis)', input: { hint: 'Optional follow-up prompt' } },
   { name: 'code', description: 'Switch to code mode (default)', input: { hint: 'Optional follow-up prompt' } },
   { name: 'yolo', description: 'Bypass all permission prompts', input: { hint: 'Optional follow-up prompt' } },
-  { name: 'ask', description: 'Switch to default mode (alias for /code)', input: { hint: 'Optional follow-up prompt' } },
-  { name: 'architect', description: 'Switch to plan mode (alias for /plan)', input: { hint: 'Optional follow-up prompt' } },
 ];
 
 // Tool name to ACP ToolKind mapping (spec-compliant values only)
 // Valid kinds: read, edit, delete, move, search, execute, think, fetch, switch_mode, other
 export const toolKindMap = {
+  // Read tools
+  Read: 'read',
+
   // Search tools
-  Read: 'search',
   Grep: 'search',
   glob: 'search',
   finder: 'search',
@@ -58,6 +56,11 @@ export const toolKindMap = {
   edit_file: 'edit',
   create_file: 'edit',
   undo_edit: 'edit',
+  format_file: 'edit',
+
+  // Delete/Move tools
+  delete_file: 'delete',
+  move_file: 'move',
 
   // Execution tools
   Bash: 'execute',
@@ -67,7 +70,64 @@ export const toolKindMap = {
   oracle: 'think',
   todo_read: 'search',
   todo_write: 'edit',
+
+  // Plan tools
+  read_plan: 'search',
+  edit_plan: 'edit',
 };
+
+export function getAmpSettingsOverridesForMode(modeId) {
+  switch (modeId) {
+    case 'bypassPermissions':
+      return {
+        dangerouslyAllowAll: true,
+        prependPermissions: [],
+        disableTools: [],
+      };
+    case 'acceptEdits':
+      return {
+        dangerouslyAllowAll: false,
+        prependPermissions: [
+          { tool: 'create_file', action: 'allow' },
+          { tool: 'edit_file', action: 'allow' },
+          { tool: 'delete_file', action: 'allow' },
+          { tool: 'move_file', action: 'allow' },
+          { tool: 'undo_edit', action: 'allow' },
+          { tool: 'format_file', action: 'allow' },
+        ],
+        disableTools: [],
+      };
+    case 'plan':
+      return {
+        dangerouslyAllowAll: false,
+        prependPermissions: [
+          { tool: 'Bash', action: 'reject' },
+          { tool: 'create_file', action: 'reject' },
+          { tool: 'edit_file', action: 'reject' },
+          { tool: 'delete_file', action: 'reject' },
+          { tool: 'move_file', action: 'reject' },
+          { tool: 'undo_edit', action: 'reject' },
+          { tool: 'format_file', action: 'reject' },
+        ],
+        disableTools: [
+          'builtin:Bash',
+          'builtin:create_file',
+          'builtin:edit_file',
+          'builtin:delete_file',
+          'builtin:move_file',
+          'builtin:undo_edit',
+          'builtin:format_file',
+        ],
+      };
+    case 'default':
+    default:
+      return {
+        dangerouslyAllowAll: false,
+        prependPermissions: [],
+        disableTools: [],
+      };
+  }
+}
 
 /**
  * Get ACP-compliant tool kind for a given tool name

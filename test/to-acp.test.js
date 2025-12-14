@@ -127,7 +127,7 @@ describe('toAcpNotifications', () => {
       expect(result[0].update.sessionUpdate).toBe('tool_call');
       expect(result[0].update.toolCallId).toBe('tool-789');
       expect(result[0].update.title).toBe('Read some/file.txt');
-      expect(result[0].update.kind).toBe('search');
+      expect(result[0].update.kind).toBe('read');
       expect(result[0].update.status).toBe('pending');
       expect(result[0].update.locations).toEqual([{ path: '/some/file.txt' }]);
       
@@ -251,7 +251,7 @@ describe('inline nested tool mode', () => {
     config.nestedToolMode = originalMode;
   });
 
-  it('embeds child tool_use as update on parent instead of separate tool_call', () => {
+  it('embeds child tool_use as full content array update on parent', () => {
     const tracker = new NestedToolTracker();
     const msg = {
       type: 'assistant',
@@ -270,18 +270,21 @@ describe('inline nested tool mode', () => {
 
     const result = toAcpNotifications(msg, sessionId, new Map(), {}, tracker);
 
-    // Should emit tool_call_update on PARENT, not a new tool_call
+    // Should emit full content array on PARENT (ACP replaces, not appends)
     expect(result).toHaveLength(1);
     expect(result[0].update.sessionUpdate).toBe('tool_call_update');
     expect(result[0].update.toolCallId).toBe('parent-task-123');
-    expect(result[0].update.content[0].content.text).toContain('Read');
-    expect(result[0].update.content[0].content.text).toContain('bar.ts');
+    // Content shows running indicator and progress summary
+    const text = result[0].update.content[0].content.text;
+    expect(text).toContain('◐'); // running indicator
+    expect(text).toContain('Read');
+    expect(text).toContain('1 running');
 
     // Child should be registered in tracker
     expect(tracker.isChildTool('child-read-456')).toBe(true);
   });
 
-  it('embeds child tool_result as completion update on parent', () => {
+  it('embeds child tool_result with updated full content array on parent', () => {
     const tracker = new NestedToolTracker();
     // First, register the child
     tracker.registerChild('child-read-456', 'parent-task-123', 'Read', { path: '/foo/bar.ts' });
@@ -302,15 +305,17 @@ describe('inline nested tool mode', () => {
 
     const result = toAcpNotifications(msg, sessionId, new Map(), {}, tracker);
 
-    // Should emit tool_call_update on PARENT with success indicator
+    // Should emit full content array on PARENT with completion status
     expect(result).toHaveLength(1);
     expect(result[0].update.sessionUpdate).toBe('tool_call_update');
     expect(result[0].update.toolCallId).toBe('parent-task-123');
-    expect(result[0].update.content[0].content.text).toContain('✓');
-    expect(result[0].update.content[0].content.text).toContain('Read');
+    const text = result[0].update.content[0].content.text;
+    expect(text).toContain('✓'); // completed indicator
+    expect(text).toContain('Read');
+    expect(text).toContain('1 done');
   });
 
-  it('shows failure indicator for failed child tools', () => {
+  it('shows failure indicator in full content array for failed child tools', () => {
     const tracker = new NestedToolTracker();
     tracker.registerChild('child-bash-789', 'parent-task-123', 'Bash', { cmd: 'npm test' });
 
@@ -330,8 +335,9 @@ describe('inline nested tool mode', () => {
 
     const result = toAcpNotifications(msg, sessionId, new Map(), {}, tracker);
 
-    expect(result[0].update.content[0].content.text).toContain('✗');
-    expect(result[0].update.content[0].content.text).toContain('failed');
+    const text = result[0].update.content[0].content.text;
+    expect(text).toContain('✗');
+    expect(text).toContain('1 failed');
   });
 });
 
@@ -369,5 +375,95 @@ describe('NestedToolTracker', () => {
 
     expect(tracker.isChildTool('child-1')).toBe(false);
     expect(tracker.isChildTool('child-2')).toBe(false);
+  });
+
+  it('tracks parent stats with total, completed, failed counts', () => {
+    const tracker = new NestedToolTracker();
+    tracker.registerChild('child-1', 'parent-1', 'Read', { path: '/a.ts' });
+    tracker.registerChild('child-2', 'parent-1', 'Read', { path: '/b.ts' });
+    tracker.registerChild('child-3', 'parent-1', 'Bash', { cmd: 'npm test' });
+
+    const stats = tracker.getParentStats('parent-1');
+    expect(stats.total).toBe(3);
+    expect(stats.completed).toBe(0);
+    expect(stats.failed).toBe(0);
+
+    tracker.completeChild('child-1', false);
+    expect(stats.completed).toBe(1);
+    expect(stats.failed).toBe(0);
+
+    tracker.completeChild('child-3', true);
+    expect(stats.completed).toBe(1);
+    expect(stats.failed).toBe(1);
+  });
+
+  it('generates full content array for ACP updates', () => {
+    const tracker = new NestedToolTracker();
+    tracker.registerChild('child-1', 'parent-1', 'Read', { path: '/a.ts' });
+    tracker.registerChild('child-2', 'parent-1', 'Read', { path: '/b.ts' });
+
+    // Both running
+    let content = tracker.getContentArray('parent-1');
+    expect(content).toHaveLength(1);
+    let text = content[0].content.text;
+    expect(text).toContain('◐'); // running indicator
+    expect(text).toContain('2 running');
+    expect(text).toContain('(0/2)');
+
+    // One completed
+    tracker.completeChild('child-1', false);
+    content = tracker.getContentArray('parent-1');
+    text = content[0].content.text;
+    expect(text).toContain('✓'); // completed indicator
+    expect(text).toContain('1 running');
+    expect(text).toContain('1 done');
+    expect(text).toContain('(1/2)');
+
+    // Both completed
+    tracker.completeChild('child-2', false);
+    content = tracker.getContentArray('parent-1');
+    text = content[0].content.text;
+    expect(text).toContain('2 done');
+    expect(text).toContain('(2/2)');
+  });
+
+  it('shows all child tools in content array (no collapsing)', () => {
+    const tracker = new NestedToolTracker();
+
+    // Register 5 child tools
+    for (let i = 1; i <= 5; i++) {
+      tracker.registerChild(`child-${i}`, 'parent-1', 'Read', { path: `/file${i}.ts` });
+    }
+
+    // Complete all of them
+    for (let i = 1; i <= 5; i++) {
+      tracker.completeChild(`child-${i}`, false);
+    }
+
+    const content = tracker.getContentArray('parent-1');
+    const text = content[0].content.text;
+    // All 5 completed items should appear
+    expect((text.match(/✓/g) || []).length).toBe(5);
+    expect(text).toContain('5 done');
+  });
+
+  it('preserves child order in content array', () => {
+    const tracker = new NestedToolTracker();
+    tracker.registerChild('child-1', 'parent-1', 'Read', { path: '/a.ts' });
+    tracker.registerChild('child-2', 'parent-1', 'Bash', { cmd: 'fail' });
+    tracker.registerChild('child-3', 'parent-1', 'Read', { path: '/b.ts' });
+
+    tracker.completeChild('child-2', true); // failed
+    tracker.completeChild('child-1', false); // completed
+
+    const content = tracker.getContentArray('parent-1');
+    const text = content[0].content.text;
+    const lines = text.split('\n');
+    
+    // Items should appear in registration order, not status order
+    // child-1 (completed), child-2 (failed), child-3 (running)
+    expect(lines[0]).toContain('✓'); // child-1 completed
+    expect(lines[1]).toContain('✗'); // child-2 failed
+    expect(lines[2]).toContain('◐'); // child-3 running
   });
 });

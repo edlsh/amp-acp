@@ -1,12 +1,23 @@
 import { describe, it, expect } from 'vitest';
-import { getToolKind, getToolTitle, toolKindMap, slashCommands, config } from '../src/config.js';
+import {
+  config,
+  getAmpSettingsOverridesForMode,
+  getToolKind,
+  getToolTitle,
+  slashCommands,
+  toolKindMap,
+} from '../src/config.js';
 
 describe('getToolKind', () => {
+  it('returns read for Read tool', () => {
+    expect(getToolKind('Read')).toBe('read');
+  });
+
   it('returns search for search tools', () => {
-    expect(getToolKind('Read')).toBe('search');
     expect(getToolKind('Grep')).toBe('search');
     expect(getToolKind('glob')).toBe('search');
     expect(getToolKind('finder')).toBe('search');
+    expect(getToolKind('read_plan')).toBe('search');
   });
 
   it('returns fetch for web tools', () => {
@@ -18,6 +29,7 @@ describe('getToolKind', () => {
     expect(getToolKind('edit_file')).toBe('edit');
     expect(getToolKind('create_file')).toBe('edit');
     expect(getToolKind('undo_edit')).toBe('edit');
+    expect(getToolKind('edit_plan')).toBe('edit');
   });
 
   it('returns execute for execution tools', () => {
@@ -95,6 +107,8 @@ describe('slashCommands', () => {
     expect(names).toContain('plan');
     expect(names).toContain('code');
     expect(names).toContain('yolo');
+    expect(names).not.toContain('ask');
+    expect(names).not.toContain('architect');
   });
 
   it('has valid structure', () => {
@@ -112,5 +126,46 @@ describe('config.commandToMode', () => {
     expect(config.commandToMode.plan).toBe('plan');
     expect(config.commandToMode.code).toBe('default');
     expect(config.commandToMode.yolo).toBe('bypassPermissions');
+  });
+});
+
+describe('getAmpSettingsOverridesForMode', () => {
+  it('enables dangerouslyAllowAll for bypassPermissions', () => {
+    const overrides = getAmpSettingsOverridesForMode('bypassPermissions');
+    expect(overrides.dangerouslyAllowAll).toBe(true);
+    expect(overrides.prependPermissions).toEqual([]);
+    expect(overrides.disableTools).toEqual([]);
+  });
+
+  it('allows edit tools for acceptEdits', () => {
+    const overrides = getAmpSettingsOverridesForMode('acceptEdits');
+    expect(overrides.dangerouslyAllowAll).toBe(false);
+    expect(overrides.prependPermissions).toEqual(
+      expect.arrayContaining([
+        { tool: 'edit_file', action: 'allow' },
+        { tool: 'create_file', action: 'allow' },
+      ])
+    );
+  });
+
+  it('rejects mutating tools and disables builtin mutators for plan', () => {
+    const overrides = getAmpSettingsOverridesForMode('plan');
+    expect(overrides.dangerouslyAllowAll).toBe(false);
+    expect(overrides.prependPermissions).toEqual(
+      expect.arrayContaining([
+        { tool: 'Bash', action: 'reject' },
+        { tool: 'edit_file', action: 'reject' },
+      ])
+    );
+    expect(overrides.disableTools).toEqual(
+      expect.arrayContaining(['builtin:Bash', 'builtin:edit_file'])
+    );
+  });
+
+  it('defaults to non-dangerous settings for unknown mode IDs', () => {
+    const overrides = getAmpSettingsOverridesForMode('unknown-mode');
+    expect(overrides.dangerouslyAllowAll).toBe(false);
+    expect(overrides.prependPermissions).toEqual([]);
+    expect(overrides.disableTools).toEqual([]);
   });
 });

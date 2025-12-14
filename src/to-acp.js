@@ -6,15 +6,29 @@ import { config, getToolKind, getToolTitle, getToolLocations, getInlineToolDescr
 /**
  * State tracker for nested tool call handling
  * Tracks mapping between Amp tool_use_id and child tool metadata
+ * Also tracks per-parent progress counters for consolidated display
  */
 export class NestedToolTracker {
   constructor() {
-    // Map: childToolUseId → { parentToolUseId, name, input, status }
+    // Map: childToolUseId → { parentToolUseId, name, input, status, index }
     this.childTools = new Map();
+    // Map: parentToolUseId → { total, completed, failed, children: [{id, name, input, status}] }
+    this.parentStats = new Map();
+    // How many completed items to show before collapsing
+    this.maxVisibleCompleted = 3;
   }
 
   registerChild(childId, parentId, name, input) {
-    this.childTools.set(childId, { parentToolUseId: parentId, name, input, status: 'running' });
+    // Initialize parent stats if needed
+    if (!this.parentStats.has(parentId)) {
+      this.parentStats.set(parentId, { total: 0, completed: 0, failed: 0, children: [] });
+    }
+    const stats = this.parentStats.get(parentId);
+    const index = stats.total;
+    stats.total++;
+    stats.children.push({ id: childId, name, input, status: 'running' });
+
+    this.childTools.set(childId, { parentToolUseId: parentId, name, input, status: 'running', index });
   }
 
   getChild(childId) {
@@ -25,16 +39,75 @@ export class NestedToolTracker {
     const child = this.childTools.get(childId);
     if (child) {
       child.status = isError ? 'failed' : 'completed';
+      
+      // Update parent stats
+      const stats = this.parentStats.get(child.parentToolUseId);
+      if (stats) {
+        if (isError) {
+          stats.failed++;
+        } else {
+          stats.completed++;
+        }
+        // Update child in children array
+        const childEntry = stats.children.find(c => c.id === childId);
+        if (childEntry) {
+          childEntry.status = child.status;
+        }
+      }
     }
     return child;
+  }
+
+  getParentStats(parentId) {
+    return this.parentStats.get(parentId);
   }
 
   isChildTool(childId) {
     return this.childTools.has(childId);
   }
 
+  /**
+   * Get full content array for a parent tool (ACP replaces content on each update)
+   * Returns array of content objects ready for ACP tool_call_update
+   */
+  getContentArray(parentId) {
+    const stats = this.parentStats.get(parentId);
+    if (!stats) return [];
+
+    const lines = [];
+    for (const child of stats.children) {
+      const desc = getInlineToolDescription(child.name, child.input);
+      let icon;
+      if (child.status === 'running') {
+        icon = '◐';
+      } else if (child.status === 'failed') {
+        icon = '✗';
+      } else {
+        icon = '✓';
+      }
+      lines.push(`${icon} ${desc}`);
+    }
+
+    // Add progress summary
+    const { total, completed, failed } = stats;
+    const done = completed + failed;
+    const running = total - done;
+    const parts = [];
+    if (running > 0) parts.push(`${running} running`);
+    if (completed > 0) parts.push(`${completed} done`);
+    if (failed > 0) parts.push(`${failed} failed`);
+    
+    if (parts.length > 0) {
+      lines.push(`── ${parts.join(', ')} (${done}/${total}) ──`);
+    }
+
+    // Return as ACP content array (single text block with all lines)
+    return [{ type: 'content', content: { type: 'text', text: lines.join('\n') } }];
+  }
+
   clear() {
     this.childTools.clear();
+    this.parentStats.clear();
   }
 }
 
@@ -71,16 +144,13 @@ export function toAcpNotifications(msg, sessionId, activeToolCalls = new Map(), 
             if (inlineMode && nestedTracker) {
               const childInfo = nestedTracker.completeChild(chunk.tool_use_id, isError);
               if (childInfo) {
-                // Emit update on PARENT with child completion status
-                const statusIcon = isError ? '✗' : '✓';
-                const desc = getInlineToolDescription(childInfo.name, childInfo.input);
-                const statusText = isError ? ' (failed)' : '';
+                // Emit full content array on PARENT (ACP replaces content, not appends)
                 output.push({
                   sessionId,
                   update: {
                     toolCallId: childInfo.parentToolUseId,
                     sessionUpdate: 'tool_call_update',
-                    content: [{ type: 'content', content: { type: 'text', text: `${statusIcon} ${desc}${statusText}` } }],
+                    content: nestedTracker.getContentArray(childInfo.parentToolUseId),
                   },
                 });
                 continue; // Don't emit separate tool_call_update for child
@@ -128,14 +198,13 @@ export function toAcpNotifications(msg, sessionId, activeToolCalls = new Map(), 
               // Register this child tool
               nestedTracker.registerChild(chunk.id, msg.parent_tool_use_id, chunk.name, chunk.input);
 
-              // Emit a "running" indicator on the parent
-              const desc = getInlineToolDescription(chunk.name, chunk.input);
+              // Emit full content array on the parent (ACP replaces content, not appends)
               output.push({
                 sessionId,
                 update: {
                   toolCallId: msg.parent_tool_use_id,
                   sessionUpdate: 'tool_call_update',
-                  content: [{ type: 'content', content: { type: 'text', text: `◐ ${desc}` } }],
+                  content: nestedTracker.getContentArray(msg.parent_tool_use_id),
                 },
               });
               continue; // Don't emit separate tool_call for child
@@ -158,7 +227,7 @@ export function toAcpNotifications(msg, sessionId, activeToolCalls = new Map(), 
               update: {
                 toolCallId: chunk.id,
                 sessionUpdate: 'tool_call',
-                rawInput: safeJson(chunk.input),
+                rawInput: JSON.stringify(chunk.input),
                 status: 'pending',
                 title: getToolTitle(chunk.name, msg.parent_tool_use_id, chunk.input),
                 kind: getToolKind(chunk.name),

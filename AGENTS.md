@@ -63,7 +63,7 @@ test/
 - Tracks plan state per session
 
 ### Slash Commands
-- Exposes `/plan`, `/code`, `/yolo`, `/ask`, `/architect` commands via `available_commands_update`
+- Exposes `/plan`, `/code`, `/yolo` commands via `available_commands_update`
 - Intercepts prompts starting with `/command` and calls `setSessionMode()`
 - Commands map to Amp modes in `config.commandToMode`
 - **Emission timing**: Commands are emitted via `setImmediate()` after session creation to ensure the `session/new` or `session/load` response is processed first by clients (fixes Zed compatibility)
@@ -99,7 +99,7 @@ agentCapabilities: {
 | `AMP_EXECUTABLE` | Path to Amp CLI binary | `amp` |
 | `AMP_PREFER_SYSTEM_PATH` | Set to `1` to strip npx paths and use system Amp | - |
 | `AMP_ACP_TIMEOUT_MS` | Prompt timeout in milliseconds | `600000` (10 min) |
-| `AMP_ACP_NESTED_MODE` | `inline` (embed child tools in parent) or `separate` (individual tool cards) | `inline` |
+| `AMP_ACP_NESTED_MODE` | `inline` (embed child tools in parent) or `separate` (individual tool cards) | `separate` |
 
 ## Code Style
 
