@@ -4,3 +4,7 @@ RESEARCH-HANDOFF-THREADS.md
 # Ignore local config
 .npmrc
 .env
+
+# Ignore logs
+logs/
+*.log
