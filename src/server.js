@@ -22,8 +22,8 @@ export class AmpAcpAgent {
     this.sessions = new Map();
   }
 
-  async initialize(request) {
-    this.clientCapabilities = request.clientCapabilities;
+  async initialize(_request) {
+    this.clientCapabilities = _request.clientCapabilities;
     return {
       protocolVersion: config.protocolVersion,
       agentCapabilities: {
@@ -36,7 +36,7 @@ export class AmpAcpAgent {
     };
   }
 
-  async newSession(params) {
+  async newSession(_params) {
     const sessionId = `S-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
     this.sessions.set(sessionId, {
@@ -61,12 +61,19 @@ export class AmpAcpAgent {
 
     return {
       sessionId,
-      models: { currentModelId: 'default', availableModels: [{ modelId: 'default', name: 'Default', description: 'Amp default' }] },
+      models: {
+        currentModelId: 'default',
+        availableModels: [{ modelId: 'default', name: 'Default', description: 'Amp default' }],
+      },
       modes: {
         currentModeId: 'default',
         availableModes: [
           { id: 'default', name: 'Always Ask', description: 'Prompts for permission on first use of each tool' },
-          { id: 'acceptEdits', name: 'Accept Edits', description: 'Automatically accepts file edit permissions for the session' },
+          {
+            id: 'acceptEdits',
+            name: 'Accept Edits',
+            description: 'Automatically accepts file edit permissions for the session',
+          },
           { id: 'bypassPermissions', name: 'Bypass Permissions', description: 'Skips all permission prompts' },
           { id: 'plan', name: 'Plan Mode', description: 'Analyze but not modify files or execute commands' },
         ],
@@ -154,7 +161,11 @@ export class AmpAcpAgent {
         currentModeId: 'default',
         availableModes: [
           { id: 'default', name: 'Always Ask', description: 'Prompts for permission on first use of each tool' },
-          { id: 'acceptEdits', name: 'Accept Edits', description: 'Automatically accepts file edit permissions for the session' },
+          {
+            id: 'acceptEdits',
+            name: 'Accept Edits',
+            description: 'Automatically accepts file edit permissions for the session',
+          },
           { id: 'bypassPermissions', name: 'Bypass Permissions', description: 'Skips all permission prompts' },
           { id: 'plan', name: 'Plan Mode', description: 'Analyze but not modify files or execute commands' },
         ],
@@ -177,7 +188,10 @@ export class AmpAcpAgent {
                 sessionId: threadId,
                 update: {
                   sessionUpdate: 'agent_thought_chunk',
-                  content: { type: 'text', text: 'Note: Could not load full history. Thread continuation is available.' },
+                  content: {
+                    type: 'text',
+                    text: 'Note: Could not load full history. Thread continuation is available.',
+                  },
                 },
               });
             } catch (e) {
@@ -229,7 +243,9 @@ export class AmpAcpAgent {
     return {};
   }
 
-  async setSessionModel(_params) { return {}; }
+  async setSessionModel(_params) {
+    return {};
+  }
 
   async prompt(params) {
     const s = this.sessions.get(params.sessionId);
@@ -295,9 +311,7 @@ export class AmpAcpAgent {
       ? ['threads', 'continue', s.threadId, ...config.ampContinueFlags]
       : config.ampFlags;
 
-    const finalSpawnArgs = ampSettingsFile
-      ? [...spawnArgs, '--settings-file', ampSettingsFile]
-      : spawnArgs;
+    const finalSpawnArgs = ampSettingsFile ? [...spawnArgs, '--settings-file', ampSettingsFile] : spawnArgs;
 
     logSpawn.debug('Spawning amp process', {
       sessionId: params.sessionId,
@@ -319,13 +333,15 @@ export class AmpAcpAgent {
       logSpawn.error('Failed to spawn amp', { sessionId: params.sessionId, error: err.message });
       if (!procEnded) {
         procEnded = true;
-        this.client.sessionUpdate({
-          sessionId: params.sessionId,
-          update: {
-            sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text: `Error: Failed to start amp: ${err.message}` },
-          },
-        }).catch(() => {});
+        this.client
+          .sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: `Error: Failed to start amp: ${err.message}` },
+            },
+          })
+          .catch(() => {});
       }
     });
 
@@ -392,7 +408,13 @@ export class AmpAcpAgent {
         }
       }
 
-      const notifications = toAcpNotifications(msg, params.sessionId, s.activeToolCalls, this.clientCapabilities, s.nestedTracker);
+      const notifications = toAcpNotifications(
+        msg,
+        params.sessionId,
+        s.activeToolCalls,
+        this.clientCapabilities,
+        s.nestedTracker
+      );
       for (const notif of notifications) {
         try {
           await this.client.sessionUpdate(notif);
@@ -403,9 +425,11 @@ export class AmpAcpAgent {
     };
 
     rlOut.on('line', (line) => {
-      s.chain = s.chain.then(() => processLine(line)).catch((e) => {
-        logProtocol.error('Line processing error', { sessionId: params.sessionId, error: e.message });
-      });
+      s.chain = s.chain
+        .then(() => processLine(line))
+        .catch((e) => {
+          logProtocol.error('Line processing error', { sessionId: params.sessionId, error: e.message });
+        });
     });
 
     rlErr.on('line', (line) => {
@@ -469,13 +493,15 @@ export class AmpAcpAgent {
         safeClose(rlErr);
         // Wait for queued event processing to complete before returning
         await s.chain;
-        await this.client.sessionUpdate({
-          sessionId: params.sessionId,
-          update: {
-            sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text: 'Error: Amp process timed out' },
-          },
-        }).catch(() => {});
+        await this.client
+          .sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'Error: Amp process timed out' },
+            },
+          })
+          .catch(() => {});
         return { stopReason: 'refusal' };
       }
 
@@ -634,14 +660,20 @@ export class AmpAcpAgent {
     return {};
   }
 
-  async readTextFile(params) { return this.client.readTextFile(params); }
-  async writeTextFile(params) { return this.client.writeTextFile(params); }
+  async readTextFile(params) {
+    return this.client.readTextFile(params);
+  }
+  async writeTextFile(params) {
+    return this.client.writeTextFile(params);
+  }
 
   _cleanupSession(sessionId) {
     const s = this.sessions.get(sessionId);
     if (!s) return;
     for (const terminal of s.terminals.values()) {
-      try { terminal.release(); } catch {}
+      try {
+        terminal.release();
+      } catch {}
     }
     s.terminals.clear();
     s.nestedTracker.clear();
@@ -686,9 +718,13 @@ function uniqStrings(values) {
 }
 
 function safeClose(rl) {
-  try { rl?.close(); } catch {}
+  try {
+    rl?.close();
+  } catch {}
 }
 
 function safeKill(proc, signal) {
-  try { proc?.kill(signal); } catch {}
+  try {
+    proc?.kill(signal);
+  } catch {}
 }

@@ -34,7 +34,11 @@ export const config = {
 
 // Slash commands exposed to ACP clients
 export const slashCommands = [
-  { name: 'plan', description: 'Switch to plan mode (read-only analysis)', input: { hint: 'Optional follow-up prompt' } },
+  {
+    name: 'plan',
+    description: 'Switch to plan mode (read-only analysis)',
+    input: { hint: 'Optional follow-up prompt' },
+  },
   { name: 'code', description: 'Switch to code mode (default)', input: { hint: 'Optional follow-up prompt' } },
   { name: 'yolo', description: 'Bypass all permission prompts', input: { hint: 'Optional follow-up prompt' } },
 ];
@@ -283,9 +287,7 @@ export function buildSpawnEnv() {
   if (config.preferSystemPath && env.PATH) {
     // Drop npx/npm-local node_modules/.bin segments
     const separator = process.platform === 'win32' ? ';' : ':';
-    const parts = env.PATH.split(separator).filter(
-      (p) => !/\bnode_modules\/\.bin\b|\/_npx\//.test(p)
-    );
+    const parts = env.PATH.split(separator).filter((p) => !/\bnode_modules\/\.bin\b|\/_npx\//.test(p));
     env.PATH = parts.join(separator);
   }
   return env;

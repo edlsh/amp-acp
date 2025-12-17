@@ -39,7 +39,7 @@ export class NestedToolTracker {
     const child = this.childTools.get(childId);
     if (child) {
       child.status = isError ? 'failed' : 'completed';
-      
+
       // Update parent stats
       const stats = this.parentStats.get(child.parentToolUseId);
       if (stats) {
@@ -49,7 +49,7 @@ export class NestedToolTracker {
           stats.completed++;
         }
         // Update child in children array
-        const childEntry = stats.children.find(c => c.id === childId);
+        const childEntry = stats.children.find((c) => c.id === childId);
         if (childEntry) {
           childEntry.status = child.status;
         }
@@ -96,7 +96,7 @@ export class NestedToolTracker {
     if (running > 0) parts.push(`${running} running`);
     if (completed > 0) parts.push(`${completed} done`);
     if (failed > 0) parts.push(`${failed} failed`);
-    
+
     if (parts.length > 0) {
       lines.push(`── ${parts.join(', ')} (${done}/${total}) ──`);
     }
@@ -111,7 +111,13 @@ export class NestedToolTracker {
   }
 }
 
-export function toAcpNotifications(msg, sessionId, activeToolCalls = new Map(), clientCapabilities = {}, nestedTracker = null) {
+export function toAcpNotifications(
+  msg,
+  sessionId,
+  activeToolCalls = new Map(),
+  _clientCapabilities = {},
+  nestedTracker = null
+) {
   const output = [];
   const inlineMode = config.nestedToolMode === 'inline';
 
@@ -217,10 +223,8 @@ export function toAcpNotifications(msg, sessionId, activeToolCalls = new Map(), 
             const locations = getToolLocations(chunk.name, chunk.input);
 
             // Build _meta for nested tool calls (subagent/oracle) in separate mode
-            const meta = msg.parent_tool_use_id
-              ? { parentToolCallId: msg.parent_tool_use_id }
-              : undefined;
-            
+            const meta = msg.parent_tool_use_id ? { parentToolCallId: msg.parent_tool_use_id } : undefined;
+
             // Emit initial tool_call with status: pending
             output.push({
               sessionId,
@@ -236,7 +240,7 @@ export function toAcpNotifications(msg, sessionId, activeToolCalls = new Map(), 
                 ...(meta && { _meta: meta }),
               },
             });
-            
+
             // Immediately emit tool_call_update with status: in_progress
             output.push({
               sessionId,
@@ -294,14 +298,6 @@ function toAcpContentArray(content, isError = false) {
 
 function wrapCode(t) {
   return '```\n' + t + '\n```';
-}
-
-function safeJson(x) {
-  try {
-    return JSON.parse(JSON.stringify(x));
-  } catch {
-    return undefined;
-  }
 }
 
 /**

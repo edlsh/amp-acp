@@ -13,12 +13,12 @@
 
 ## Commands
 
-| Task | Command |
-|------|---------|
-| Run | `npm start` or `node src/index.js` |
-| Test | `npm test` |
-| Test (watch) | `npm run test:watch` |
-| Lint | `npm run lint` (no-op) |
+| Task         | Command                            |
+| ------------ | ---------------------------------- |
+| Run          | `npm start` or `node src/index.js` |
+| Test         | `npm test`                         |
+| Test (watch) | `npm run test:watch`               |
+| Lint         | `npm run lint` (no-op)             |
 
 ## Architecture
 
@@ -48,21 +48,25 @@ test/
 ## ACP Features Implemented
 
 ### Connection Lifecycle
+
 - Captures `AgentSideConnection.signal` to detect connection closure
 - Aborts in-flight Amp processes when connection drops
 - Logs connection state changes to stderr
 
 ### Terminal API (Bash Tool)
+
 - Routes Bash command output through ACP Terminal API when client supports `terminal` capability
 - Creates terminal on `tool_use` for Bash, releases on `tool_result`
 - Embeds terminal ID in tool call content: `{ type: "terminal", terminalId }`
 
 ### Agent Plan Updates
+
 - Maps `todo_write`/`todo_read` tool calls to ACP Plan updates
 - Emits `session/update` with `sessionUpdate: "plan"` and `entries` array
 - Tracks plan state per session
 
 ### Slash Commands
+
 - Exposes `/plan`, `/code`, `/yolo` commands via `available_commands_update`
 - Intercepts prompts starting with `/command` and calls `setSessionMode()`
 - Commands map to Amp modes in `config.commandToMode`
@@ -71,11 +75,13 @@ test/
 - **Self-healing fallback**: Commands are emitted at prompt start if not already sent
 
 ### Tool Call Status Progression
+
 - `tool_use`: Emits `tool_call` with `status: "pending"`
 - Immediately emits `tool_call_update` with `status: "in_progress"`
 - `tool_result`: Emits `tool_call_update` with `status: "completed"` or `"failed"`
 
 ### Session Load / Thread Continuation
+
 - Implements ACP `session/load` using Amp thread IDs (`T-<uuid>`)
 - Captures `session_id` from Amp JSON messages and stores as `threadId`
 - On `loadSession`: fetches history via `amp threads markdown T-xxx`, replays as `agent_message_chunk`
@@ -83,6 +89,7 @@ test/
 - Emits thread URL via `agent_thought_chunk` on session start
 
 ### Enhanced Capability Declaration
+
 ```js
 agentCapabilities: {
   promptCapabilities: { image: true, embeddedContext: true },
@@ -94,12 +101,12 @@ agentCapabilities: {
 
 ## Environment Variables
 
-| Variable | Purpose | Default |
-|----------|---------|---------|
-| `AMP_EXECUTABLE` | Path to Amp CLI binary | `amp` |
-| `AMP_PREFER_SYSTEM_PATH` | Set to `1` to strip npx paths and use system Amp | - |
-| `AMP_ACP_TIMEOUT_MS` | Prompt timeout in milliseconds | `600000` (10 min) |
-| `AMP_ACP_NESTED_MODE` | `inline` (embed child tools in parent) or `separate` (individual tool cards) | `separate` |
+| Variable                 | Purpose                                                                      | Default           |
+| ------------------------ | ---------------------------------------------------------------------------- | ----------------- |
+| `AMP_EXECUTABLE`         | Path to Amp CLI binary                                                       | `amp`             |
+| `AMP_PREFER_SYSTEM_PATH` | Set to `1` to strip npx paths and use system Amp                             | -                 |
+| `AMP_ACP_TIMEOUT_MS`     | Prompt timeout in milliseconds                                               | `600000` (10 min) |
+| `AMP_ACP_NESTED_MODE`    | `inline` (embed child tools in parent) or `separate` (individual tool cards) | `separate`        |
 
 ## Code Style
 
@@ -112,23 +119,25 @@ agentCapabilities: {
 
 ### File Locations
 
-| File | Purpose |
-|------|---------|
-| `package.json` | Source of truth for version (semver) |
-| `CHANGELOG.md` | User-facing change history ([Keep a Changelog](https://keepachangelog.com/)) |
-| `scripts/bump-version.sh` | Atomic version bump script |
+| File                      | Purpose                                                                      |
+| ------------------------- | ---------------------------------------------------------------------------- |
+| `package.json`            | Source of truth for version (semver)                                         |
+| `CHANGELOG.md`            | User-facing change history ([Keep a Changelog](https://keepachangelog.com/)) |
+| `scripts/bump-version.sh` | Atomic version bump script                                                   |
 
 ### Changelog Maintenance (AI Agents)
 
 **When to add entries:** After completing any user-visible change (features, fixes, API changes, behavior changes).
 
 **How to add entries:**
+
 1. Edit `CHANGELOG.md`
 2. Add entry under `## [Unreleased]` in the appropriate category
 3. Use imperative mood ("Add feature" not "Added feature")
 4. Include issue/PR references when applicable
 
 **Categories (in order):**
+
 - `### Added` — New features
 - `### Changed` — Changes to existing functionality
 - `### Deprecated` — Features marked for removal
@@ -137,13 +146,16 @@ agentCapabilities: {
 - `### Security` — Security-related changes
 
 **Example entry:**
+
 ```markdown
 ## [Unreleased]
 
 ### Added
+
 - Support for image attachments in prompts (#42)
 
 ### Fixed
+
 - Race condition in readline event processing
 ```
 
@@ -159,16 +171,19 @@ agentCapabilities: {
 | `major` | Breaking changes | 0.2.0 → 1.0.0 |
 
 **How to bump:**
+
 ```bash
 ./scripts/bump-version.sh patch   # or minor, major
 ```
 
 This script atomically:
+
 1. Updates `package.json` version
 2. Moves `[Unreleased]` entries to new version section with date
 3. Updates comparison links
 
 **Post-bump steps (manual):**
+
 ```bash
 git commit -am "Release vX.Y.Z"
 git tag vX.Y.Z

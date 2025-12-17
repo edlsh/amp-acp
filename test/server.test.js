@@ -54,16 +54,16 @@ describe('AmpAcpAgent', () => {
 
     it('emits available_commands_update after newSession', async () => {
       vi.useFakeTimers();
-      
+
       const result = await agent.newSession({});
       expect(result.sessionId).toBeDefined();
-      
+
       // Command emission is deferred via setImmediate
       expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
-      
+
       // Run setImmediate callbacks
       await vi.runAllTimersAsync();
-      
+
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: result.sessionId,
         update: {
@@ -79,42 +79,40 @@ describe('AmpAcpAgent', () => {
 
     it('emits available_commands_update after loadSession', async () => {
       vi.useFakeTimers();
-      
+
       // Mock _replayThreadHistory to avoid actual exec
       agent._replayThreadHistory = vi.fn().mockResolvedValue(undefined);
-      
+
       const result = await agent.loadSession({ sessionId: 'T-test-uuid', workspaceRoot: '/tmp' });
       expect(result.sessionId).toBe('T-test-uuid');
-      
+
       // Command emission is deferred via setImmediate
       expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
-      
+
       // Run setImmediate callbacks
       await vi.runAllTimersAsync();
-      
+
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'T-test-uuid',
         update: {
           sessionUpdate: 'available_commands_update',
-          availableCommands: expect.arrayContaining([
-            expect.objectContaining({ name: 'plan' }),
-          ]),
+          availableCommands: expect.arrayContaining([expect.objectContaining({ name: 'plan' })]),
         },
       });
     });
 
     it('emits only once per session (idempotency)', async () => {
       vi.useFakeTimers();
-      
+
       const result = await agent.newSession({});
       await vi.runAllTimersAsync();
-      
+
       // First emission
       expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1);
-      
+
       // Try to emit again
       await agent._emitAvailableCommands(result.sessionId);
-      
+
       // Should still be 1 (idempotent)
       expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1);
     });
@@ -136,9 +134,9 @@ describe('AmpAcpAgent', () => {
         nestedTracker: { clear: vi.fn() },
         sentAvailableCommands: false,
       });
-      
+
       // Mock spawn to avoid actual process
-      const originalPrompt = agent.prompt.bind(agent);
+      const _originalPrompt = agent.prompt.bind(agent);
       agent.prompt = async (params) => {
         const s = agent.sessions.get(params.sessionId);
         if (!s.sentAvailableCommands) {
@@ -146,9 +144,9 @@ describe('AmpAcpAgent', () => {
         }
         return { stopReason: 'end_turn' };
       };
-      
+
       await agent.prompt({ sessionId, prompt: [{ type: 'text', text: 'test' }] });
-      
+
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId,
         update: {

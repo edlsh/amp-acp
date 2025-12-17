@@ -3,24 +3,26 @@
 import { createWriteStream } from 'fs';
 
 const LEVELS = { error: 0, warn: 1, info: 2, debug: 3, trace: 4 };
-const LEVEL_NAMES = Object.keys(LEVELS);
 
 function parseNamespaces(str) {
   const include = [];
   const exclude = [];
-  
+
   if (!str || str === '*') {
     return { include: ['*'], exclude: [] };
   }
-  
-  for (const part of str.split(',').map(s => s.trim()).filter(Boolean)) {
+
+  for (const part of str
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)) {
     if (part.startsWith('-')) {
       exclude.push(part.slice(1));
     } else {
       include.push(part);
     }
   }
-  
+
   return { include: include.length ? include : ['*'], exclude };
 }
 
@@ -75,19 +77,17 @@ function resolveLevel() {
 function resolveNamespaces() {
   const explicit = process.env.AMP_ACP_LOG_NAMESPACES;
   if (explicit) return parseNamespaces(explicit);
-  
+
   // Backward compat: DEBUG env var for namespace filtering
   const debug = process.env.DEBUG;
   if (debug) return parseNamespaces(debug);
-  
+
   return parseNamespaces('*');
 }
 
 // Module-level config (evaluated once at import)
 const config = {
-  stream: process.env.AMP_ACP_LOG
-    ? createWriteStream(process.env.AMP_ACP_LOG, { flags: 'a' })
-    : process.stderr,
+  stream: process.env.AMP_ACP_LOG ? createWriteStream(process.env.AMP_ACP_LOG, { flags: 'a' }) : process.stderr,
   level: resolveLevel(),
   format: process.env.AMP_ACP_LOG_FORMAT || 'text',
   namespaces: resolveNamespaces(),
@@ -98,9 +98,8 @@ function log(level, ns, msg, ctx = {}) {
   if (!matchNamespace(ns, config.namespaces)) return;
 
   const ts = new Date().toISOString();
-  const output = config.format === 'json'
-    ? JSON.stringify({ ts, level, ns, msg, ...ctx })
-    : formatText(ts, level, ns, msg, ctx);
+  const output =
+    config.format === 'json' ? JSON.stringify({ ts, level, ns, msg, ...ctx }) : formatText(ts, level, ns, msg, ctx);
 
   config.stream.write(output + '\n');
 }

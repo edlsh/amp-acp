@@ -130,7 +130,7 @@ describe('toAcpNotifications', () => {
       expect(result[0].update.kind).toBe('read');
       expect(result[0].update.status).toBe('pending');
       expect(result[0].update.locations).toEqual([{ path: '/some/file.txt' }]);
-      
+
       // Second notification: in_progress status update
       expect(result[1].update.sessionUpdate).toBe('tool_call_update');
       expect(result[1].update.toolCallId).toBe('tool-789');
@@ -459,7 +459,7 @@ describe('NestedToolTracker', () => {
     const content = tracker.getContentArray('parent-1');
     const text = content[0].content.text;
     const lines = text.split('\n');
-    
+
     // Items should appear in registration order, not status order
     // child-1 (completed), child-2 (failed), child-3 (running)
     expect(lines[0]).toContain('✓'); // child-1 completed

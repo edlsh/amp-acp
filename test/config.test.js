@@ -57,10 +57,21 @@ describe('getToolKind', () => {
   });
 
   it('only returns ACP spec-compliant values', () => {
-    const validKinds = ['read', 'edit', 'delete', 'move', 'search', 'execute', 'think', 'fetch', 'switch_mode', 'other'];
-    
+    const validKinds = [
+      'read',
+      'edit',
+      'delete',
+      'move',
+      'search',
+      'execute',
+      'think',
+      'fetch',
+      'switch_mode',
+      'other',
+    ];
+
     // Test all mapped tools
-    for (const [tool, kind] of Object.entries(toolKindMap)) {
+    for (const [_tool, kind] of Object.entries(toolKindMap)) {
       expect(validKinds).toContain(kind);
     }
 
@@ -157,9 +168,7 @@ describe('getAmpSettingsOverridesForMode', () => {
         { tool: 'edit_file', action: 'reject' },
       ])
     );
-    expect(overrides.disableTools).toEqual(
-      expect.arrayContaining(['builtin:Bash', 'builtin:edit_file'])
-    );
+    expect(overrides.disableTools).toEqual(expect.arrayContaining(['builtin:Bash', 'builtin:edit_file']));
   });
 
   it('defaults to non-dangerous settings for unknown mode IDs', () => {
