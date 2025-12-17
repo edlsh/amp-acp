@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Runbook documentation in `docs/runbooks/` for operational procedures
+- Branch protection configured for main branch (requires PR reviews + CI checks)
+- Issue labeling system established with bug/enhancement labels
+
 ## [0.2.5] - 2025-12-14
 
 ### Changed
