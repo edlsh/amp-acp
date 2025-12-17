@@ -2,7 +2,7 @@ import prettier from 'eslint-config-prettier';
 
 export default [
   {
-    ignores: ['node_modules/**', 'coverage/**', 'logs/**'],
+    ignores: ['node_modules/**', 'coverage/**', 'logs/**', 'docs/**'],
   },
   {
     files: ['**/*.js'],
@@ -39,6 +39,12 @@ export default [
       eqeqeq: ['error', 'always'],
       'no-var': 'error',
       'prefer-const': 'error',
+      // Naming conventions
+      camelcase: ['error', { properties: 'never', ignoreDestructuring: true }],
+      // Complexity analysis
+      complexity: ['warn', { max: 15 }],
+      'max-depth': ['warn', 4],
+      'max-nested-callbacks': ['warn', 3],
     },
   },
   prettier,
