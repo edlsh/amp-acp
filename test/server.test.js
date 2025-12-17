@@ -3,38 +3,204 @@ import { AmpAcpAgent } from '../src/server.js';
 
 describe('AmpAcpAgent', () => {
   describe('session lifecycle', () => {
-    it.todo('creates session with unique ID on newSession()');
-    it.todo('tracks session state in sessions Map');
-    it.todo('cleans up session resources on connection close');
+    let agent;
+    let mockClient;
+
+    beforeEach(() => {
+      mockClient = {
+        sessionUpdate: vi.fn().mockResolvedValue({}),
+      };
+      agent = new AmpAcpAgent(mockClient, Promise.resolve(null));
+    });
+
+    it('creates session with unique ID on newSession()', async () => {
+      vi.useFakeTimers();
+      const result1 = await agent.newSession({});
+      const result2 = await agent.newSession({});
+
+      expect(result1.sessionId).toMatch(/^S-[a-z0-9]+-[a-z0-9]+$/);
+      expect(result2.sessionId).toMatch(/^S-[a-z0-9]+-[a-z0-9]+$/);
+      expect(result1.sessionId).not.toBe(result2.sessionId);
+      vi.useRealTimers();
+    });
+
+    it('tracks session state in sessions Map', async () => {
+      vi.useFakeTimers();
+      const result = await agent.newSession({});
+
+      const session = agent.sessions.get(result.sessionId);
+      expect(session).toBeDefined();
+      expect(session.state).toBe('idle');
+      expect(session.cancelled).toBe(false);
+      expect(session.active).toBe(false);
+      expect(session.activeToolCalls).toBeInstanceOf(Map);
+      expect(session.terminals).toBeInstanceOf(Map);
+      vi.useRealTimers();
+    });
+
+    it('cleans up session resources on _cleanupSession()', async () => {
+      vi.useFakeTimers();
+      const result = await agent.newSession({});
+      const sessionId = result.sessionId;
+
+      // Add some state to clean up
+      const session = agent.sessions.get(sessionId);
+      session.activeToolCalls.set('tool-1', { name: 'Read', lastStatus: 'in_progress', startTime: Date.now() });
+
+      // Cleanup
+      agent._cleanupSession(sessionId);
+
+      expect(agent.sessions.has(sessionId)).toBe(false);
+      vi.useRealTimers();
+    });
   });
 
   describe('cancel', () => {
-    it.todo('sets cancelled flag and sends SIGINT to active process');
-    it.todo('returns empty object when session not found');
-    it.todo('no-ops when session is not active');
+    let agent;
+    let mockClient;
+
+    beforeEach(() => {
+      mockClient = {
+        sessionUpdate: vi.fn().mockResolvedValue({}),
+      };
+      agent = new AmpAcpAgent(mockClient, Promise.resolve(null));
+    });
+
+    it('returns outcome cancelled when session not found', async () => {
+      const result = await agent.cancel({ sessionId: 'non-existent' });
+      expect(result).toEqual({ outcome: 'cancelled' });
+    });
+
+    it('sets cancelled flag and sends SIGINT to active process', async () => {
+      vi.useFakeTimers();
+      const sessionResult = await agent.newSession({});
+      const sessionId = sessionResult.sessionId;
+
+      const session = agent.sessions.get(sessionId);
+      const mockProc = { kill: vi.fn() };
+      session.active = true;
+      session.proc = mockProc;
+
+      const result = await agent.cancel({ sessionId });
+
+      expect(result).toEqual({ outcome: 'cancelled' });
+      expect(session.cancelled).toBe(true);
+      expect(mockProc.kill).toHaveBeenCalledWith('SIGINT');
+      vi.useRealTimers();
+    });
+
+    it('no-ops when session is not active', async () => {
+      vi.useFakeTimers();
+      const sessionResult = await agent.newSession({});
+      const sessionId = sessionResult.sessionId;
+
+      const session = agent.sessions.get(sessionId);
+      session.active = false;
+
+      const result = await agent.cancel({ sessionId });
+
+      expect(result).toEqual({ outcome: 'cancelled' });
+      expect(session.cancelled).toBe(false); // Should not be set
+      vi.useRealTimers();
+    });
   });
 
   describe('loadSession', () => {
-    it.todo('validates thread ID format (T-<uuid>)');
-    it.todo('creates session with preset threadId');
-    it.todo('replays thread history via amp threads markdown');
-    it.todo('handles history fetch failure gracefully');
+    let agent;
+    let mockClient;
+
+    beforeEach(() => {
+      mockClient = {
+        sessionUpdate: vi.fn().mockResolvedValue({}),
+      };
+      agent = new AmpAcpAgent(mockClient, Promise.resolve(null));
+      // Mock _validateThreadExists to return true (thread exists)
+      agent._validateThreadExists = vi.fn().mockResolvedValue(true);
+      // Mock _replayThreadHistory to avoid actual exec
+      agent._replayThreadHistory = vi.fn().mockResolvedValue(undefined);
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('validates thread ID format (T-<uuid>)', async () => {
+      await expect(agent.loadSession({ sessionId: 'invalid-id' })).rejects.toThrow('Invalid thread ID format');
+      await expect(agent.loadSession({ sessionId: '' })).rejects.toThrow('Invalid thread ID format');
+      await expect(agent.loadSession({ sessionId: 'S-12345' })).rejects.toThrow('Invalid thread ID format');
+    });
+
+    it('validates thread exists before creating session', async () => {
+      agent._validateThreadExists = vi.fn().mockResolvedValue(false);
+
+      await expect(agent.loadSession({ sessionId: 'T-nonexistent', workspaceRoot: '/tmp' })).rejects.toThrow(
+        'Thread not found'
+      );
+      expect(agent._validateThreadExists).toHaveBeenCalledWith('T-nonexistent', '/tmp');
+    });
+
+    it('creates session with preset threadId', async () => {
+      vi.useFakeTimers();
+      const threadId = 'T-test-uuid-123';
+      const result = await agent.loadSession({ sessionId: threadId, workspaceRoot: '/tmp' });
+
+      expect(result.sessionId).toBe(threadId);
+
+      const session = agent.sessions.get(threadId);
+      expect(session).toBeDefined();
+      expect(session.threadId).toBe(threadId);
+      expect(session.state).toBe('idle');
+    });
+
+    it('replays thread history via amp threads markdown', async () => {
+      vi.useFakeTimers();
+      const threadId = 'T-test-uuid-456';
+      await agent.loadSession({ sessionId: threadId, workspaceRoot: '/home/user/project' });
+
+      expect(agent._replayThreadHistory).toHaveBeenCalledWith(threadId, '/home/user/project');
+    });
   });
 
   describe('slash commands', () => {
     it.todo('intercepts /plan and switches to plan mode');
     it.todo('intercepts /code and switches to default mode');
     it.todo('intercepts /yolo and switches to bypassPermissions mode');
-    it.todo('intercepts /ask and switches to default mode');
-    it.todo('intercepts /architect and switches to plan mode');
-    it.todo('processes remaining text after command as prompt');
-    it.todo('acknowledges mode switch when no follow-up text');
   });
 
   describe('prompt', () => {
     it.todo('awaits connectionSignalPromise before processing');
     it.todo('awaits s.chain before returning on timeout');
     it.todo('awaits s.chain before returning on connection close');
+
+    describe('session state machine', () => {
+      let agent;
+      let mockClient;
+
+      beforeEach(() => {
+        mockClient = {
+          sessionUpdate: vi.fn().mockResolvedValue({}),
+        };
+        agent = new AmpAcpAgent(mockClient, Promise.resolve(null));
+      });
+
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      it('rejects prompts when session is in failed state', async () => {
+        vi.useFakeTimers();
+        const result = await agent.newSession({});
+        const sessionId = result.sessionId;
+
+        // Manually set session to failed state
+        const session = agent.sessions.get(sessionId);
+        session.state = 'failed';
+
+        await expect(
+          agent.prompt({ sessionId, prompt: [{ type: 'text', text: 'test' }], cwd: '/tmp' })
+        ).rejects.toThrow('Session is in failed state');
+      });
+    });
   });
 
   describe('available_commands_update', () => {

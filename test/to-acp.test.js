@@ -122,19 +122,14 @@ describe('toAcpNotifications', () => {
 
       const result = toAcpNotifications(msg, sessionId);
 
-      // Feature 5: Tool calls now emit 2 notifications (pending + in_progress)
-      expect(result).toHaveLength(2);
+      // Tool calls now emit single notification with status: in_progress (atomic emission)
+      expect(result).toHaveLength(1);
       expect(result[0].update.sessionUpdate).toBe('tool_call');
       expect(result[0].update.toolCallId).toBe('tool-789');
       expect(result[0].update.title).toBe('Read some/file.txt');
       expect(result[0].update.kind).toBe('read');
-      expect(result[0].update.status).toBe('pending');
+      expect(result[0].update.status).toBe('in_progress');
       expect(result[0].update.locations).toEqual([{ path: '/some/file.txt' }]);
-
-      // Second notification: in_progress status update
-      expect(result[1].update.sessionUpdate).toBe('tool_call_update');
-      expect(result[1].update.toolCallId).toBe('tool-789');
-      expect(result[1].update.status).toBe('in_progress');
     });
 
     it('handles thinking content', () => {
@@ -204,6 +199,78 @@ describe('toAcpNotifications', () => {
       const msg = { type: 'unknown_type' };
       const result = toAcpNotifications(msg, sessionId);
       expect(result).toHaveLength(0);
+    });
+  });
+
+  describe('tool call status validation', () => {
+    it('validates status transitions and prevents invalid ones', () => {
+      const activeToolCalls = new Map();
+
+      // First tool_use - should work (now emits single in_progress notification)
+      const msg1 = {
+        type: 'assistant',
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              id: 'tool-123',
+              name: 'Read',
+              input: { path: '/test' },
+            },
+          ],
+        },
+      };
+
+      let result = toAcpNotifications(msg1, sessionId, activeToolCalls);
+      expect(result).toHaveLength(1); // Single tool_call with in_progress
+      expect(result[0].update.status).toBe('in_progress');
+
+      // Valid transition: in_progress -> completed
+      const msg2 = {
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'tool-123',
+              is_error: false,
+              content: 'success',
+            },
+          ],
+        },
+      };
+
+      result = toAcpNotifications(msg2, sessionId, activeToolCalls);
+      expect(result).toHaveLength(1);
+      expect(result[0].update.status).toBe('completed');
+      expect(activeToolCalls.has('tool-123')).toBe(false); // Should be cleaned up
+    });
+
+    it('handles duplicate toolCallId by generating unique replacement', () => {
+      const activeToolCalls = new Map([
+        ['tool-123', { name: 'Read', startTime: Date.now(), lastStatus: 'in_progress' }],
+      ]);
+
+      const msg = {
+        type: 'assistant',
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              id: 'tool-123', // Duplicate
+              name: 'Grep',
+              input: { pattern: 'test' },
+            },
+          ],
+        },
+      };
+
+      const result = toAcpNotifications(msg, sessionId, activeToolCalls);
+      expect(result).toHaveLength(1); // Single tool_call with in_progress
+      const newToolCallId = result[0].update.toolCallId;
+      expect(newToolCallId).not.toBe('tool-123');
+      // ID format: {originalId}_{base36timestamp}_{random4chars}
+      expect(newToolCallId).toMatch(/^tool-123_[a-z0-9]+_[a-z0-9]+$/);
     });
   });
 });

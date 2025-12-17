@@ -5,14 +5,32 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
+// P2.1 backpressure: imported but not yet integrated (requires readline replacement)
+import { pipeline as _pipeline } from 'node:stream/promises';
+import _split2 from 'split2';
 import { toAcpNotifications, isBashToolUse, getToolResult, NestedToolTracker } from './to-acp.js';
 import { config, buildSpawnEnv, slashCommands, getAmpSettingsOverridesForMode } from './config.js';
 import { createLogger } from './logger.js';
+import { CircuitBreaker } from './circuit-breaker.js';
 
 const logSession = createLogger('acp:session');
 const logProtocol = createLogger('acp:protocol');
 const logSpawn = createLogger('amp:spawn');
 const logStderr = createLogger('amp:stderr');
+
+// Global spawn circuit breaker - protects against repeated spawn failures
+const spawnBreaker = new CircuitBreaker({
+  name: 'amp-spawn',
+  failureThreshold: 5,
+  resetTimeMs: 30000, // 30 seconds
+});
+
+// Session state machine
+const SessionState = {
+  IDLE: 'idle',
+  ACTIVE: 'active',
+  FAILED: 'failed',
+};
 
 export class AmpAcpAgent {
   constructor(client, connectionSignalPromise) {
@@ -20,6 +38,32 @@ export class AmpAcpAgent {
     // connectionSignalPromise resolves to AbortSignal after connection is fully initialized
     this.connectionSignalPromise = connectionSignalPromise;
     this.sessions = new Map();
+  }
+
+  /**
+   * Wrapper for sessionUpdate with severity classification
+   * @param {object} notif - The notification to send
+   * @param {object} options - Options
+   * @param {boolean} options.critical - If true, throw on failure; if false, log warning only
+   */
+  async _sessionUpdate(notif, { critical = false } = {}) {
+    try {
+      await this.client.sessionUpdate(notif);
+    } catch (e) {
+      if (critical) {
+        logProtocol.error('Critical sessionUpdate failed', {
+          sessionId: notif.sessionId,
+          updateType: notif.update?.sessionUpdate,
+          error: e.message,
+        });
+        throw e;
+      }
+      logProtocol.warn('sessionUpdate failed (best-effort)', {
+        sessionId: notif.sessionId,
+        updateType: notif.update?.sessionUpdate,
+        error: e.message,
+      });
+    }
   }
 
   async initialize(_request) {
@@ -40,6 +84,7 @@ export class AmpAcpAgent {
     const sessionId = `S-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
     this.sessions.set(sessionId, {
+      state: SessionState.IDLE,
       proc: null,
       rl: null,
       cancelled: false,
@@ -127,10 +172,17 @@ export class AmpAcpAgent {
       throw new RequestError(-32602, 'Invalid thread ID format. Expected T-<uuid>');
     }
 
+    // Validate thread exists before creating session
+    const threadExists = await this._validateThreadExists(threadId, params.workspaceRoot);
+    if (!threadExists) {
+      throw new RequestError(-32602, `Thread not found: ${threadId}`);
+    }
+
     logSession.info('Loading session', { threadId, cwd: params.workspaceRoot });
 
     // Create session with threadId preset
     this.sessions.set(threadId, {
+      state: SessionState.IDLE,
       proc: null,
       rl: null,
       cancelled: false,
@@ -222,6 +274,30 @@ export class AmpAcpAgent {
     });
   }
 
+  /**
+   * Validate that a thread exists by checking with amp threads show
+   * @param {string} threadId - The thread ID to validate
+   * @param {string} cwd - Working directory
+   * @returns {Promise<boolean>} - True if thread exists
+   */
+  async _validateThreadExists(threadId, cwd) {
+    return new Promise((resolve) => {
+      execFile(
+        config.ampExecutable,
+        ['threads', 'show', threadId],
+        { cwd: cwd || process.cwd(), env: buildSpawnEnv(), timeout: 10000 },
+        (error) => {
+          if (error) {
+            logSession.debug('Thread validation failed', { threadId, error: error.message });
+            resolve(false);
+            return;
+          }
+          resolve(true);
+        }
+      );
+    });
+  }
+
   async setSessionMode(params) {
     const s = this.sessions.get(params.sessionId);
     if (s) {
@@ -250,10 +326,31 @@ export class AmpAcpAgent {
   async prompt(params) {
     const s = this.sessions.get(params.sessionId);
     if (!s) throw new RequestError(-32002, 'Session not found');
+
+    // Block prompts on failed sessions
+    if (s.state === SessionState.FAILED) {
+      throw new RequestError(-32002, 'Session is in failed state and cannot accept new prompts');
+    }
+
+    s.state = SessionState.ACTIVE;
     s.cancelled = false;
     s.active = true;
     s.activeToolCalls.clear();
     s.nestedTracker.clear();
+
+    // Periodic cleanup of stale tool calls (older than 30 minutes)
+    const staleThreshold = Date.now() - 30 * 60 * 1000;
+    for (const [toolCallId, toolCall] of s.activeToolCalls) {
+      if (toolCall.startTime < staleThreshold) {
+        logProtocol.warn('Cleaning up stale tool call', {
+          sessionId: params.sessionId,
+          toolCallId,
+          name: toolCall.name,
+          ageMinutes: Math.round((Date.now() - toolCall.startTime) / (60 * 1000)),
+        });
+        s.activeToolCalls.delete(toolCallId);
+      }
+    }
 
     const cwd = params.cwd || process.cwd();
     let ampSettingsFile = null;
@@ -322,6 +419,22 @@ export class AmpAcpAgent {
       ampSettingsFile,
     });
 
+    // Check circuit breaker before spawning
+    if (!spawnBreaker.isAllowed()) {
+      logSpawn.warn('Circuit breaker is open, rejecting spawn', { sessionId: params.sessionId });
+      s.state = SessionState.FAILED;
+      await this.client
+        .sessionUpdate({
+          sessionId: params.sessionId,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Error: Too many spawn failures. Please try again later.' },
+          },
+        })
+        .catch(() => {});
+      return { stopReason: 'refusal' };
+    }
+
     const proc = spawn(config.ampExecutable, finalSpawnArgs, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -330,6 +443,8 @@ export class AmpAcpAgent {
 
     proc.on('error', (err) => {
       spawnError = err;
+      spawnBreaker.recordFailure(); // Record spawn failure
+      s.state = SessionState.FAILED; // Transition to failed state on spawn error
       logSpawn.error('Failed to spawn amp', { sessionId: params.sessionId, error: err.message });
       if (!procEnded) {
         procEnded = true;
@@ -461,6 +576,10 @@ export class AmpAcpAgent {
             clearTimeoutTimer();
             safeClose(rlOut);
             safeClose(rlErr);
+            // Record success on normal close (exit code 0)
+            if (code === 0) {
+              spawnBreaker.recordSuccess();
+            }
             s.chain.then(() => resolve({ type: 'closed', code, signal }));
           });
         }),
@@ -477,7 +596,7 @@ export class AmpAcpAgent {
 
       if (result.type === 'connection_closed') {
         logSpawn.warn('Connection closed during prompt, killing process', { sessionId: params.sessionId });
-        safeKill(proc, 'SIGKILL');
+        await gracefulKill(proc, 2000); // 2s grace for connection close
         safeClose(rlOut);
         safeClose(rlErr);
         // Wait for queued event processing to complete before returning
@@ -488,7 +607,7 @@ export class AmpAcpAgent {
 
       if (result.type === 'timeout') {
         logSpawn.error('Process timed out', { sessionId: params.sessionId, timeoutMs: config.timeoutMs });
-        safeKill(proc, 'SIGKILL');
+        await gracefulKill(proc, 3000); // 3s grace for timeout
         safeClose(rlOut);
         safeClose(rlErr);
         // Wait for queued event processing to complete before returning
@@ -520,6 +639,14 @@ export class AmpAcpAgent {
       s.cancelled = false;
       s.proc = null;
       s.rl = null;
+
+      // Reset to IDLE unless session is in FAILED state
+      if (s.state !== SessionState.FAILED) {
+        s.state = SessionState.IDLE;
+      }
+
+      // Release all terminals at end of prompt (guaranteed cleanup)
+      await this._releaseAllTerminals(s);
 
       if (ampSettingsFile) {
         try {
@@ -608,7 +735,12 @@ export class AmpAcpAgent {
         args: ['-c', chunk.input.cmd],
         cwd: chunk.input.cwd || process.cwd(),
       });
-      session.terminals.set(chunk.id, terminal);
+      // Track terminal with lease metadata for TTL-based cleanup
+      session.terminals.set(chunk.id, {
+        terminal,
+        createdAt: Date.now(),
+        leaseMs: 5 * 60 * 1000, // 5 min lease
+      });
       // Emit tool_call_update with terminal content
       await this.client.sessionUpdate({
         sessionId,
@@ -624,15 +756,26 @@ export class AmpAcpAgent {
   }
 
   async _releaseTerminal(session, toolCallId) {
-    const terminal = session.terminals.get(toolCallId);
-    if (terminal) {
+    const entry = session.terminals.get(toolCallId);
+    if (entry) {
       try {
-        await terminal.release();
+        await entry.terminal.release();
       } catch (e) {
         logProtocol.warn('Failed to release terminal', { toolCallId, error: e.message });
       }
       session.terminals.delete(toolCallId);
     }
+  }
+
+  async _releaseAllTerminals(session) {
+    for (const [toolCallId, entry] of session.terminals) {
+      try {
+        await entry.terminal.release();
+      } catch (e) {
+        logProtocol.warn('Failed to release terminal during cleanup', { toolCallId, error: e.message });
+      }
+    }
+    session.terminals.clear();
   }
 
   async _emitPlanUpdate(sessionId, session) {
@@ -651,13 +794,13 @@ export class AmpAcpAgent {
 
   async cancel(params) {
     const s = this.sessions.get(params.sessionId);
-    if (!s) return {};
+    if (!s) return { outcome: 'cancelled' }; // Session not found, already cancelled
     if (s.active && s.proc) {
       s.cancelled = true;
       logSession.debug('Cancelling session', { sessionId: params.sessionId });
       safeKill(s.proc, 'SIGINT');
     }
-    return {};
+    return { outcome: 'cancelled' };
   }
 
   async readTextFile(params) {
@@ -670,13 +813,39 @@ export class AmpAcpAgent {
   _cleanupSession(sessionId) {
     const s = this.sessions.get(sessionId);
     if (!s) return;
-    for (const terminal of s.terminals.values()) {
-      try {
-        terminal.release();
-      } catch {}
+
+    // Emit failed status for ALL non-terminal tool calls (not just in_progress)
+    for (const [toolCallId, toolCall] of s.activeToolCalls) {
+      const status = toolCall.lastStatus;
+      if (status !== 'completed' && status !== 'failed') {
+        logProtocol.warn('Cleaning up orphaned tool call', {
+          sessionId,
+          toolCallId,
+          name: toolCall.name,
+          status,
+          startTime: toolCall.startTime,
+        });
+        // Emit failed status for orphaned calls (fire-and-forget)
+        this.client
+          .sessionUpdate({
+            sessionId,
+            update: {
+              toolCallId,
+              sessionUpdate: 'tool_call_update',
+              status: 'failed',
+              content: [{ type: 'content', content: { type: 'text', text: 'Tool call was interrupted' } }],
+            },
+          })
+          .catch(() => {});
+      }
     }
-    s.terminals.clear();
+
+    // Release all terminals with guaranteed cleanup
+    this._releaseAllTerminals(s);
+
+    // Clear all state trackers
     s.nestedTracker.clear();
+    s.activeToolCalls.clear();
     this.sessions.delete(sessionId);
     logSession.debug('Session cleaned up', { sessionId });
   }
@@ -727,4 +896,40 @@ function safeKill(proc, signal) {
   try {
     proc?.kill(signal);
   } catch {}
+}
+
+/**
+ * Two-phase graceful kill: SIGTERM first, then SIGKILL after timeout
+ * @param {ChildProcess} proc - The process to kill
+ * @param {number} graceMs - Grace period before SIGKILL (default: 5000ms)
+ * @returns {Promise<'exited'|'killed'>}
+ */
+async function gracefulKill(proc, graceMs = 5000) {
+  if (!proc || proc.exitCode !== null) {
+    return 'exited';
+  }
+
+  return new Promise((resolve) => {
+    const cleanup = () => {
+      clearTimeout(timer);
+      proc.removeListener('exit', onExit);
+    };
+
+    const onExit = () => {
+      cleanup();
+      resolve('exited');
+    };
+
+    proc.once('exit', onExit);
+
+    // First try SIGTERM (graceful)
+    safeKill(proc, 'SIGTERM');
+
+    // If still running after grace period, force kill
+    const timer = setTimeout(() => {
+      proc.removeListener('exit', onExit);
+      safeKill(proc, 'SIGKILL');
+      resolve('killed');
+    }, graceMs);
+  });
 }

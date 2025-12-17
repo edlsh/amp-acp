@@ -2,6 +2,9 @@
 // Schema reference: https://ampcode.com/manual/appendix#stream-json-output
 
 import { config, getToolKind, getToolTitle, getToolLocations, getInlineToolDescription } from './config.js';
+import { createLogger } from './logger.js';
+
+const logProtocol = createLogger('acp:protocol');
 
 /**
  * State tracker for nested tool call handling
@@ -121,6 +124,70 @@ export function toAcpNotifications(
   const output = [];
   const inlineMode = config.nestedToolMode === 'inline';
 
+  /**
+   * Generate a session-unique ACP tool call ID from an Amp tool_use_id
+   * If the ID already exists, generate a unique replacement and track the mapping
+   * @param {string} ampId - Original Amp tool_use_id
+   * @returns {string} - Session-unique ACP tool call ID
+   */
+  const getUniqueToolCallId = (ampId) => {
+    if (!activeToolCalls.has(ampId)) {
+      return ampId; // ID is unique, use as-is
+    }
+    // Generate unique replacement ID
+    const uniqueId = `${ampId}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    logProtocol.warn('Generated unique toolCallId for duplicate', {
+      originalId: ampId,
+      uniqueId,
+      sessionId,
+    });
+    return uniqueId;
+  };
+
+  /**
+   * Find the ACP tool call ID for a given Amp tool_use_id
+   * Handles both direct matches and ampId->acpId mappings
+   * @param {string} ampId - Original Amp tool_use_id from tool_result
+   * @returns {string|null} - ACP tool call ID or null if not found
+   */
+  const findAcpToolCallId = (ampId) => {
+    // Direct match (most common case - ID wasn't remapped)
+    if (activeToolCalls.has(ampId)) {
+      return ampId;
+    }
+    // Search for mapped ID
+    for (const [acpId, toolCall] of activeToolCalls) {
+      if (toolCall.ampId === ampId) {
+        return acpId;
+      }
+    }
+    return null;
+  };
+
+  // Track tool call state transitions for validation
+  const validateStatusTransition = (toolCallId, newStatus) => {
+    const existingCall = activeToolCalls.get(toolCallId);
+    if (!existingCall) return true; // New tool call
+
+    const currentStatus = existingCall.lastStatus;
+    const validTransitions = {
+      in_progress: ['completed', 'failed'],
+      completed: [], // Terminal state
+      failed: [], // Terminal state
+    };
+
+    if (!validTransitions[currentStatus]?.includes(newStatus)) {
+      logProtocol.warn('Invalid status transition', {
+        toolCallId,
+        from: currentStatus,
+        to: newStatus,
+        validTransitions: validTransitions[currentStatus],
+      });
+      return false;
+    }
+    return true;
+  };
+
   switch (msg.type) {
     case 'system':
       if (msg.subtype === 'init') {
@@ -145,10 +212,24 @@ export function toAcpNotifications(
           if (chunk.type === 'tool_result') {
             const isError = chunk.is_error;
             const status = isError ? 'failed' : 'completed';
+            const ampId = chunk.tool_use_id;
+
+            // Find the ACP tool call ID (handles remapped IDs)
+            const acpToolCallId = findAcpToolCallId(ampId) || ampId;
+
+            // Validate status transition before emitting
+            if (!validateStatusTransition(acpToolCallId, status)) {
+              logProtocol.warn('Skipping invalid tool result status transition', {
+                toolCallId: acpToolCallId,
+                ampId,
+                attemptedStatus: status,
+              });
+              continue;
+            }
 
             // Check if this is a child tool result in inline mode
             if (inlineMode && nestedTracker) {
-              const childInfo = nestedTracker.completeChild(chunk.tool_use_id, isError);
+              const childInfo = nestedTracker.completeChild(ampId, isError);
               if (childInfo) {
                 // Emit full content array on PARENT (ACP replaces content, not appends)
                 output.push({
@@ -164,11 +245,11 @@ export function toAcpNotifications(
             }
 
             // Normal (non-child) tool result
-            activeToolCalls.delete(chunk.tool_use_id);
+            activeToolCalls.delete(acpToolCallId);
             output.push({
               sessionId,
               update: {
-                toolCallId: chunk.tool_use_id,
+                toolCallId: acpToolCallId,
                 sessionUpdate: 'tool_call_update',
                 status,
                 content: toAcpContentArray(chunk.content, isError),
@@ -197,12 +278,16 @@ export function toAcpNotifications(
               },
             });
           } else if (chunk.type === 'tool_use') {
+            // Generate session-unique tool call ID (handles duplicates)
+            const ampId = chunk.id;
+            const acpToolCallId = getUniqueToolCallId(ampId);
+
             const isChildTool = !!msg.parent_tool_use_id;
 
             // In inline mode, embed child tool calls into parent's content
             if (inlineMode && isChildTool && nestedTracker) {
-              // Register this child tool
-              nestedTracker.registerChild(chunk.id, msg.parent_tool_use_id, chunk.name, chunk.input);
+              // Register this child tool (use original ampId for Amp correlation)
+              nestedTracker.registerChild(ampId, msg.parent_tool_use_id, chunk.name, chunk.input);
 
               // Emit full content array on the parent (ACP replaces content, not appends)
               output.push({
@@ -216,38 +301,34 @@ export function toAcpNotifications(
               continue; // Don't emit separate tool_call for child
             }
 
-            // Normal tool call (or separate mode)
-            activeToolCalls.set(chunk.id, { name: chunk.name, startTime: Date.now() });
-
             // Build locations array for file-based tools
             const locations = getToolLocations(chunk.name, chunk.input);
 
             // Build _meta for nested tool calls (subagent/oracle) in separate mode
             const meta = msg.parent_tool_use_id ? { parentToolCallId: msg.parent_tool_use_id } : undefined;
 
-            // Emit initial tool_call with status: pending
+            // Track tool call state with ampId mapping - start directly as in_progress
+            activeToolCalls.set(acpToolCallId, {
+              ampId, // Store original Amp ID for correlation
+              name: chunk.name,
+              startTime: Date.now(),
+              lastStatus: 'in_progress',
+            });
+
+            // Emit tool_call with status: in_progress directly (skip pending for atomic emission)
+            // This prevents orphan states if the first emission fails
             output.push({
               sessionId,
               update: {
-                toolCallId: chunk.id,
+                toolCallId: acpToolCallId,
                 sessionUpdate: 'tool_call',
                 rawInput: JSON.stringify(chunk.input),
-                status: 'pending',
+                status: 'in_progress',
                 title: getToolTitle(chunk.name, msg.parent_tool_use_id, chunk.input),
                 kind: getToolKind(chunk.name),
                 content: [],
                 ...(locations.length > 0 && { locations }),
                 ...(meta && { _meta: meta }),
-              },
-            });
-
-            // Immediately emit tool_call_update with status: in_progress
-            output.push({
-              sessionId,
-              update: {
-                toolCallId: chunk.id,
-                sessionUpdate: 'tool_call_update',
-                status: 'in_progress',
               },
             });
           } else if (chunk.type === 'thinking') {
