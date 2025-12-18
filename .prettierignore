@@ -3,3 +3,4 @@ coverage
 logs
 *.log
 package-lock.json
+docs/

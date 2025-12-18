@@ -40,3 +40,6 @@ tmp_claude/
 *.tgz
 *.tar.gz
 *.zip
+
+# Generated documentation
+docs/
