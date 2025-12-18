@@ -4,3 +4,4 @@ logs
 *.log
 package-lock.json
 docs/
+AGENTS.md
