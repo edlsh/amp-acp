@@ -2,6 +2,13 @@
   "name": "amp-acp",
   "image": "mcr.microsoft.com/devcontainers/javascript-node:20",
   "postCreateCommand": "npm install",
+  "mounts": ["source=/Users/enzolucchesi/.local/bin,target=/usr/local/bin/user-tools,type=bind,readonly"],
+  "remoteEnv": {
+    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bin/user-tools"
+  },
+  "terminal": {
+    "shell": "/bin/zsh"
+  },
   "customizations": {
     "vscode": {
       "extensions": ["esbenp.prettier-vscode", "dbaeumer.vscode-eslint"],
