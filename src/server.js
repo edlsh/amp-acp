@@ -548,6 +548,17 @@ export class AmpAcpAgent {
           }
           break;
         case 'image':
+          if (chunk.data) {
+            const ampImage = {
+              type: 'image',
+              source: {
+                type: 'base64',
+                media_type: chunk.mediaType || 'image/png',
+                data: chunk.data,
+              },
+            };
+            textInput += JSON.stringify(ampImage) + '\n';
+          }
           break;
         default:
           break;

@@ -232,4 +232,50 @@ describe('AmpAcpAgent', () => {
       expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe('_buildTextInput', () => {
+    let agent;
+    let mockClient;
+
+    beforeEach(() => {
+      mockClient = {
+        sessionUpdate: vi.fn().mockResolvedValue({}),
+      };
+      agent = new AmpAcpAgent(mockClient, Promise.resolve(null));
+    });
+
+    it('converts ACP image chunks to Amp JSON format', () => {
+      const prompt = [
+        { type: 'text', text: 'Describe this image:' },
+        { type: 'image', mediaType: 'image/png', data: 'iVBORw0KGgo=' },
+      ];
+
+      const result = agent._buildTextInput(prompt);
+
+      expect(result).toContain('Describe this image:');
+      expect(result).toContain('"type":"image"');
+      expect(result).toContain('"media_type":"image/png"');
+      expect(result).toContain('"data":"iVBORw0KGgo="');
+    });
+
+    it('handles image chunks without data gracefully', () => {
+      const prompt = [
+        { type: 'text', text: 'test' },
+        { type: 'image', mediaType: 'image/png' }, // no data
+      ];
+
+      const result = agent._buildTextInput(prompt);
+
+      expect(result).toBe('test');
+      expect(result).not.toContain('"type":"image"');
+    });
+
+    it('defaults mediaType to image/png when not provided', () => {
+      const prompt = [{ type: 'image', data: 'base64data' }];
+
+      const result = agent._buildTextInput(prompt);
+
+      expect(result).toContain('"media_type":"image/png"');
+    });
+  });
 });
