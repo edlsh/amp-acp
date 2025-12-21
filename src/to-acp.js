@@ -17,8 +17,9 @@ export class NestedToolTracker {
     this.childTools = new Map();
     // Map: parentToolUseId → { total, completed, failed, children: [{id, name, input, status}] }
     this.parentStats = new Map();
-    // How many completed items to show before collapsing
+    // How many completed/failed items to show before collapsing
     this.maxVisibleCompleted = 3;
+    this.maxVisibleFailed = 5; // Show first 2 + last 3 when collapsed
   }
 
   registerChild(childId, parentId, name, input) {
@@ -78,30 +79,68 @@ export class NestedToolTracker {
     if (!stats) return [];
 
     const lines = [];
+    // Separate children by status for smart display
+    const running = [];
+    const failed = [];
+    const completed = [];
     for (const child of stats.children) {
-      const desc = getInlineToolDescription(child.name, child.input);
-      let icon;
       if (child.status === 'running') {
-        icon = '◐';
+        running.push(child);
       } else if (child.status === 'failed') {
-        icon = '✗';
+        failed.push(child);
       } else {
-        icon = '✓';
+        completed.push(child);
       }
-      lines.push(`${icon} ${desc}`);
     }
 
-    // Add progress summary
-    const { total, completed, failed } = stats;
-    const done = completed + failed;
-    const running = total - done;
+    // Always show all running items (need visibility for active work)
+    for (const child of running) {
+      lines.push(`◐ ${getInlineToolDescription(child.name, child.input)}`);
+    }
+
+    // Collapse failed items if too many (show first N + last M)
+    if (failed.length > this.maxVisibleFailed) {
+      const firstCount = Math.min(2, this.maxVisibleFailed);
+      const lastCount = Math.max(0, this.maxVisibleFailed - firstCount);
+      const hiddenFailed = failed.length - this.maxVisibleFailed;
+      for (const child of failed.slice(0, firstCount)) {
+        lines.push(`✗ ${getInlineToolDescription(child.name, child.input)}`);
+      }
+      lines.push(`✗ ... ${hiddenFailed} more failed`);
+      if (lastCount > 0) {
+        for (const child of failed.slice(-lastCount)) {
+          lines.push(`✗ ${getInlineToolDescription(child.name, child.input)}`);
+        }
+      }
+    } else {
+      for (const child of failed) {
+        lines.push(`✗ ${getInlineToolDescription(child.name, child.input)}`);
+      }
+    }
+
+    // Show only the most recent completed items, collapse older ones
+    const hiddenCompleted = completed.length - this.maxVisibleCompleted;
+    if (hiddenCompleted > 0) {
+      lines.push(`✓ ... ${hiddenCompleted} more completed`);
+    }
+    const visibleCompleted = completed.slice(-this.maxVisibleCompleted);
+    for (const child of visibleCompleted) {
+      lines.push(`✓ ${getInlineToolDescription(child.name, child.input)}`);
+    }
+
+    // Add progress summary using stats counts (not local arrays)
+    const completedCount = stats.completed;
+    const failedCount = stats.failed;
+    const totalCount = stats.total;
+    const doneCount = completedCount + failedCount;
+    const runningCount = totalCount - doneCount;
     const parts = [];
-    if (running > 0) parts.push(`${running} running`);
-    if (completed > 0) parts.push(`${completed} done`);
-    if (failed > 0) parts.push(`${failed} failed`);
+    if (runningCount > 0) parts.push(`${runningCount} running`);
+    if (completedCount > 0) parts.push(`${completedCount} done`);
+    if (failedCount > 0) parts.push(`${failedCount} failed`);
 
     if (parts.length > 0) {
-      lines.push(`── ${parts.join(', ')} (${done}/${total}) ──`);
+      lines.push(`── ${parts.join(', ')} (${doneCount}/${totalCount}) ──`);
     }
 
     // Return as ACP content array (single text block with all lines)
@@ -123,6 +162,7 @@ export function toAcpNotifications(
 ) {
   const output = [];
   const inlineMode = config.nestedToolMode === 'inline';
+  const flatMode = config.nestedToolMode === 'flat';
 
   /**
    * Generate a session-unique ACP tool call ID from an Amp tool_use_id
@@ -228,7 +268,8 @@ export function toAcpNotifications(
             }
 
             // Check if this is a child tool result in inline mode
-            if (inlineMode && nestedTracker) {
+            // In flat mode, child results are emitted as independent tool_call_updates
+            if (inlineMode && !flatMode && nestedTracker) {
               const childInfo = nestedTracker.completeChild(ampId, isError);
               if (childInfo) {
                 // Emit full content array on PARENT (ACP replaces content, not appends)
@@ -266,7 +307,8 @@ export function toAcpNotifications(
         for (const chunk of msg.message.content) {
           if (chunk.type === 'text') {
             // Text from subagent goes to parent as thought, not message
-            if (msg.parent_tool_use_id && inlineMode) {
+            // In flat mode, show subagent text as regular messages
+            if (msg.parent_tool_use_id && inlineMode && !flatMode) {
               // Skip subagent text in inline mode - the summary comes in tool_result
               continue;
             }
@@ -285,7 +327,8 @@ export function toAcpNotifications(
             const isChildTool = !!msg.parent_tool_use_id;
 
             // In inline mode, embed child tool calls into parent's content
-            if (inlineMode && isChildTool && nestedTracker) {
+            // In flat mode, emit all tools as independent top-level calls
+            if (inlineMode && !flatMode && isChildTool && nestedTracker) {
               // Register this child tool (use original ampId for Amp correlation)
               nestedTracker.registerChild(ampId, msg.parent_tool_use_id, chunk.name, chunk.input);
 
@@ -305,7 +348,8 @@ export function toAcpNotifications(
             const locations = getToolLocations(chunk.name, chunk.input);
 
             // Build _meta for nested tool calls (subagent/oracle) in separate mode
-            const meta = msg.parent_tool_use_id ? { parentToolCallId: msg.parent_tool_use_id } : undefined;
+            // In flat mode, omit _meta to treat all tools as independent
+            const meta = !flatMode && msg.parent_tool_use_id ? { parentToolCallId: msg.parent_tool_use_id } : undefined;
 
             // Track tool call state with ampId mapping - start directly as in_progress
             activeToolCalls.set(acpToolCallId, {
@@ -314,6 +358,9 @@ export function toAcpNotifications(
               startTime: Date.now(),
               lastStatus: 'in_progress',
             });
+
+            // In flat mode, omit [Subagent] prefix since tools appear independent
+            const parentIdForTitle = flatMode ? null : msg.parent_tool_use_id;
 
             // Emit tool_call with status: in_progress directly (skip pending for atomic emission)
             // This prevents orphan states if the first emission fails
@@ -324,7 +371,7 @@ export function toAcpNotifications(
                 sessionUpdate: 'tool_call',
                 rawInput: JSON.stringify(chunk.input),
                 status: 'in_progress',
-                title: getToolTitle(chunk.name, msg.parent_tool_use_id, chunk.input),
+                title: getToolTitle(chunk.name, parentIdForTitle, chunk.input),
                 kind: getToolKind(chunk.name),
                 content: [],
                 ...(locations.length > 0 && { locations }),

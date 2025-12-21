@@ -7,11 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6] - 2025-12-21
+
 ### Added
 
-- Runbook documentation in `docs/runbooks/` for operational procedures
-- Branch protection configured for main branch (requires PR reviews + CI checks)
-- Issue labeling system established with bug/enhancement labels
+- New `flat` nested tool display mode (now default) - emits all tool calls as independent top-level notifications for maximum client compatibility
+- Improved error logging with context in stream handlers and catch blocks
+
+### Changed
+
+- Default `AMP_ACP_NESTED_MODE` changed from `inline` to `flat` for better client compatibility
+- NestedToolTracker now groups items by status (running → failed → completed) with smart collapsing
+
+### Fixed
+
+- Critical bug preventing AMP ACP from loading in certain client configurations
+- Child tool results now correctly emit as independent `tool_call_update` notifications in flat mode
+- Subagent text messages now display properly in flat mode instead of being suppressed
 
 ## [0.2.5] - 2025-12-14
 
@@ -102,7 +114,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Connection lifecycle management with abort signal
 - Timeout handling for long-running prompts
 
-[Unreleased]: https://github.com/edlsh/amp-acp/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/edlsh/amp-acp/compare/v0.2.6...HEAD
+[0.2.6]: https://github.com/edlsh/amp-acp/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/edlsh/amp-acp/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/edlsh/amp-acp/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/edlsh/amp-acp/compare/v0.2.2...v0.2.3

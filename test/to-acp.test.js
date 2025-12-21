@@ -146,25 +146,31 @@ describe('toAcpNotifications', () => {
       expect(result[0].update.content.text).toBe('Let me analyze...');
     });
 
-    it('adds subagent prefix for nested tool calls', () => {
-      const msg = {
-        type: 'assistant',
-        parent_tool_use_id: 'parent-123',
-        message: {
-          content: [
-            {
-              type: 'tool_use',
-              id: 'tool-nested',
-              name: 'Bash',
-              input: { cmd: 'ls' },
-            },
-          ],
-        },
-      };
+    it('adds subagent prefix for nested tool calls in separate mode', () => {
+      const originalMode = config.nestedToolMode;
+      config.nestedToolMode = 'separate';
+      try {
+        const msg = {
+          type: 'assistant',
+          parent_tool_use_id: 'parent-123',
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                id: 'tool-nested',
+                name: 'Bash',
+                input: { cmd: 'ls' },
+              },
+            ],
+          },
+        };
 
-      const result = toAcpNotifications(msg, sessionId);
-      expect(result[0].update.title).toBe('[Subagent] Bash: ls');
-      expect(result[0].update._meta).toEqual({ parentToolCallId: 'parent-123' });
+        const result = toAcpNotifications(msg, sessionId);
+        expect(result[0].update.title).toBe('[Subagent] Bash: ls');
+        expect(result[0].update._meta).toEqual({ parentToolCallId: 'parent-123' });
+      } finally {
+        config.nestedToolMode = originalMode;
+      }
     });
   });
 
@@ -408,6 +414,128 @@ describe('inline nested tool mode', () => {
   });
 });
 
+describe('flat nested tool mode', () => {
+  const sessionId = 'test-session';
+  let originalMode;
+
+  beforeEach(() => {
+    originalMode = config.nestedToolMode;
+    config.nestedToolMode = 'flat';
+  });
+
+  afterEach(() => {
+    config.nestedToolMode = originalMode;
+  });
+
+  it('emits child tool_use as independent top-level tool_call without _meta', () => {
+    const tracker = new NestedToolTracker();
+    const msg = {
+      type: 'assistant',
+      parent_tool_use_id: 'parent-task-123',
+      message: {
+        content: [
+          {
+            type: 'tool_use',
+            id: 'child-read-456',
+            name: 'Read',
+            input: { path: '/foo/bar.ts' },
+          },
+        ],
+      },
+    };
+
+    const result = toAcpNotifications(msg, sessionId, new Map(), {}, tracker);
+
+    // Should emit as independent top-level tool_call
+    expect(result).toHaveLength(1);
+    expect(result[0].update.sessionUpdate).toBe('tool_call');
+    expect(result[0].update.toolCallId).toBe('child-read-456');
+    // No [Subagent] prefix in flat mode
+    expect(result[0].update.title).toBe('Read foo/bar.ts');
+    // No _meta in flat mode
+    expect(result[0].update._meta).toBeUndefined();
+
+    // Child should NOT be registered in tracker in flat mode
+    expect(tracker.isChildTool('child-read-456')).toBe(false);
+  });
+
+  it('emits child tool_result as independent tool_call_update', () => {
+    const activeToolCalls = new Map([
+      ['child-read-456', { ampId: 'child-read-456', name: 'Read', startTime: Date.now(), lastStatus: 'in_progress' }],
+    ]);
+
+    const msg = {
+      type: 'user',
+      message: {
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'child-read-456',
+            content: 'file contents here',
+            is_error: false,
+          },
+        ],
+      },
+    };
+
+    const result = toAcpNotifications(msg, sessionId, activeToolCalls, {}, null);
+
+    // Should emit as independent tool_call_update with status
+    expect(result).toHaveLength(1);
+    expect(result[0].update.sessionUpdate).toBe('tool_call_update');
+    expect(result[0].update.toolCallId).toBe('child-read-456');
+    expect(result[0].update.status).toBe('completed');
+    expect(result[0].update.content[0].content.text).toBe('file contents here');
+
+    // Should be cleaned up from activeToolCalls
+    expect(activeToolCalls.has('child-read-456')).toBe(false);
+  });
+
+  it('shows subagent text as agent_message_chunk', () => {
+    const msg = {
+      type: 'assistant',
+      parent_tool_use_id: 'parent-task-123',
+      message: {
+        content: [{ type: 'text', text: 'Subagent thinking out loud' }],
+      },
+    };
+
+    const result = toAcpNotifications(msg, sessionId, new Map(), {}, null);
+
+    // In flat mode, subagent text should be shown
+    expect(result).toHaveLength(1);
+    expect(result[0].update.sessionUpdate).toBe('agent_message_chunk');
+    expect(result[0].update.content.text).toBe('Subagent thinking out loud');
+  });
+
+  it('handles failed child tool_result as independent notification', () => {
+    const activeToolCalls = new Map([
+      ['child-bash-789', { ampId: 'child-bash-789', name: 'Bash', startTime: Date.now(), lastStatus: 'in_progress' }],
+    ]);
+
+    const msg = {
+      type: 'user',
+      message: {
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'child-bash-789',
+            content: 'Command failed',
+            is_error: true,
+          },
+        ],
+      },
+    };
+
+    const result = toAcpNotifications(msg, sessionId, activeToolCalls, {}, null);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].update.sessionUpdate).toBe('tool_call_update');
+    expect(result[0].update.toolCallId).toBe('child-bash-789');
+    expect(result[0].update.status).toBe('failed');
+  });
+});
+
 describe('NestedToolTracker', () => {
   it('tracks child tools and their parents', () => {
     const tracker = new NestedToolTracker();
@@ -494,7 +622,7 @@ describe('NestedToolTracker', () => {
     expect(text).toContain('(2/2)');
   });
 
-  it('shows all child tools in content array (no collapsing)', () => {
+  it('collapses completed items beyond maxVisibleCompleted', () => {
     const tracker = new NestedToolTracker();
 
     // Register 5 child tools
@@ -509,12 +637,13 @@ describe('NestedToolTracker', () => {
 
     const content = tracker.getContentArray('parent-1');
     const text = content[0].content.text;
-    // All 5 completed items should appear
-    expect((text.match(/✓/g) || []).length).toBe(5);
+    // Only maxVisibleCompleted (3) items shown, plus 1 collapse indicator
+    expect((text.match(/✓/g) || []).length).toBe(4); // 3 visible + "... 2 more completed"
+    expect(text).toContain('2 more completed');
     expect(text).toContain('5 done');
   });
 
-  it('preserves child order in content array', () => {
+  it('groups items by status (running, failed, completed)', () => {
     const tracker = new NestedToolTracker();
     tracker.registerChild('child-1', 'parent-1', 'Read', { path: '/a.ts' });
     tracker.registerChild('child-2', 'parent-1', 'Bash', { cmd: 'fail' });
@@ -527,10 +656,34 @@ describe('NestedToolTracker', () => {
     const text = content[0].content.text;
     const lines = text.split('\n');
 
-    // Items should appear in registration order, not status order
-    // child-1 (completed), child-2 (failed), child-3 (running)
-    expect(lines[0]).toContain('✓'); // child-1 completed
+    // Items grouped by status: running first, then failed, then completed
+    expect(lines[0]).toContain('◐'); // child-3 running
     expect(lines[1]).toContain('✗'); // child-2 failed
-    expect(lines[2]).toContain('◐'); // child-3 running
+    expect(lines[2]).toContain('✓'); // child-1 completed
+  });
+
+  it('collapses failed items beyond maxVisibleFailed (first 2 + last 3)', () => {
+    const tracker = new NestedToolTracker();
+    tracker.maxVisibleFailed = 5; // Explicit for test stability
+
+    // Register 8 child tools and fail all of them
+    for (let i = 1; i <= 8; i++) {
+      tracker.registerChild(`child-${i}`, 'parent-1', 'Bash', { cmd: `cmd${i}` });
+      tracker.completeChild(`child-${i}`, true); // all failed
+    }
+
+    const content = tracker.getContentArray('parent-1');
+    const text = content[0].content.text;
+    const lines = text.split('\n').filter((l) => l.startsWith('✗'));
+
+    // maxVisibleFailed=5: first 2 + collapse indicator + last 3 = 6 lines with ✗
+    expect(lines.length).toBe(6);
+    expect(lines[0]).toContain('cmd1'); // first
+    expect(lines[1]).toContain('cmd2'); // second
+    expect(lines[2]).toContain('3 more failed'); // 8-5=3 hidden
+    expect(lines[3]).toContain('cmd6'); // last 3
+    expect(lines[4]).toContain('cmd7');
+    expect(lines[5]).toContain('cmd8');
+    expect(text).toContain('8 failed');
   });
 });

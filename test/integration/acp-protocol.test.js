@@ -74,7 +74,8 @@ describe('ACP Protocol Integration', () => {
     });
 
     it('accepts valid thread ID format', async () => {
-      // Mock _replayThreadHistory to avoid actual exec
+      // Mock both methods to avoid actual exec
+      agent._validateThreadExists = vi.fn().mockResolvedValue(true);
       agent._replayThreadHistory = vi.fn().mockResolvedValue(undefined);
 
       const result = await agent.loadSession({

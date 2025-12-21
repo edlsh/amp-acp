@@ -252,7 +252,8 @@ describe('AmpAcpAgent', () => {
     it('emits available_commands_update after loadSession', async () => {
       vi.useFakeTimers();
 
-      // Mock _replayThreadHistory to avoid actual exec
+      // Mock both methods to avoid actual exec
+      agent._validateThreadExists = vi.fn().mockResolvedValue(true);
       agent._replayThreadHistory = vi.fn().mockResolvedValue(undefined);
 
       const result = await agent.loadSession({ sessionId: 'T-test-uuid', workspaceRoot: '/tmp' });

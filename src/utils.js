@@ -1,11 +1,17 @@
 import { WritableStream, ReadableStream } from 'node:stream/web';
+import { createLogger } from './logger.js';
+
+const logStreams = createLogger('acp:streams');
 
 export function nodeToWebWritable(nodeStream) {
   return new WritableStream({
     write(chunk) {
       return new Promise((resolve, reject) => {
         const canContinue = nodeStream.write(Buffer.from(chunk), (err) => {
-          if (err) reject(err);
+          if (err) {
+            logStreams.error('Writable stream error', { error: err.message, chunkSize: chunk.length });
+            reject(err);
+          }
         });
         if (canContinue) {
           resolve();
@@ -23,7 +29,10 @@ export function nodeToWebReadable(nodeStream) {
     start(controller) {
       nodeStream.on('data', (chunk) => controller.enqueue(new Uint8Array(chunk)));
       nodeStream.on('end', () => controller.close());
-      nodeStream.on('error', (err) => controller.error(err));
+      nodeStream.on('error', (err) => {
+        logStreams.error('Readable stream error', { error: err.message });
+        controller.error(err);
+      });
     },
     cancel(reason) {
       nodeStream.destroy(reason instanceof Error ? reason : undefined);

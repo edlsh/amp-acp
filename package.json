@@ -1,6 +1,6 @@
 {
   "name": "@edlsh/amp-acp",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "private": false,
   "type": "module",
   "bin": {
@@ -19,7 +19,7 @@
     "prepare": "husky"
   },
   "dependencies": {
-    "@agentclientprotocol/sdk": "^0.11.0",
+    "@agentclientprotocol/sdk": "0.11.0",
     "split2": "^4.2.0"
   },
   "devDependencies": {

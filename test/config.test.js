@@ -91,8 +91,18 @@ describe('getToolTitle', () => {
     expect(getToolTitle('oracle')).toBe('Oracle');
   });
 
-  it('returns Spawn Subagent for Task', () => {
-    expect(getToolTitle('Task')).toBe('Spawn Subagent');
+  it('returns Task for Task tool without description', () => {
+    expect(getToolTitle('Task')).toBe('Task');
+  });
+
+  it('returns description for Task tool with input', () => {
+    expect(getToolTitle('Task', null, { description: 'Explore codebase architecture' })).toBe(
+      'Explore codebase architecture'
+    );
+  });
+
+  it('returns TaskOutput for TaskOutput tool', () => {
+    expect(getToolTitle('TaskOutput')).toBe('TaskOutput');
   });
 
   it('formats MCP tool names', () => {

@@ -12,7 +12,6 @@ import { toAcpNotifications, isBashToolUse, getToolResult, NestedToolTracker } f
 import { config, buildSpawnEnv, slashCommands, getAmpSettingsOverridesForMode } from './config.js';
 import { createLogger } from './logger.js';
 import { CircuitBreaker } from './circuit-breaker.js';
-
 const logSession = createLogger('acp:session');
 const logProtocol = createLogger('acp:protocol');
 const logSpawn = createLogger('amp:spawn');
@@ -71,10 +70,10 @@ export class AmpAcpAgent {
     return {
       protocolVersion: config.protocolVersion,
       agentCapabilities: {
-        promptCapabilities: { image: true, embeddedContext: true },
         loadSession: true,
-        sessionCapabilities: { fork: false, resume: false },
+        promptCapabilities: { image: true, audio: false, embeddedContext: true },
         mcpCapabilities: { http: false, sse: false },
+        sessionCapabilities: {},
       },
       authMethods: [],
     };
@@ -431,7 +430,9 @@ export class AmpAcpAgent {
             content: { type: 'text', text: 'Error: Too many spawn failures. Please try again later.' },
           },
         })
-        .catch(() => {});
+        .catch((e) => {
+          logProtocol.warn('Failed to send spawn failure message', { sessionId: params.sessionId, error: e.message });
+        });
       return { stopReason: 'refusal' };
     }
 
@@ -456,7 +457,12 @@ export class AmpAcpAgent {
               content: { type: 'text', text: `Error: Failed to start amp: ${err.message}` },
             },
           })
-          .catch(() => {});
+          .catch((e) => {
+            logProtocol.warn('Failed to send amp start error message', {
+              sessionId: params.sessionId,
+              error: e.message,
+            });
+          });
       }
     });
 
@@ -471,7 +477,12 @@ export class AmpAcpAgent {
       let msg;
       try {
         msg = JSON.parse(line);
-      } catch {
+      } catch (e) {
+        logProtocol.debug('Failed to parse JSON line', {
+          sessionId: params.sessionId,
+          line: line.substring(0, 200),
+          error: e.message,
+        });
         hadOutput = true;
         try {
           await this.client.sessionUpdate({
@@ -620,7 +631,9 @@ export class AmpAcpAgent {
               content: { type: 'text', text: 'Error: Amp process timed out' },
             },
           })
-          .catch(() => {});
+          .catch((e) => {
+            logProtocol.warn('Failed to send timeout message', { sessionId: params.sessionId, error: e.message });
+          });
         return { stopReason: 'refusal' };
       }
 
@@ -651,7 +664,9 @@ export class AmpAcpAgent {
       if (ampSettingsFile) {
         try {
           await fs.unlink(ampSettingsFile);
-        } catch {}
+        } catch (e) {
+          logSpawn.warn('Failed to cleanup temp Amp settings file', { ampSettingsFile, error: e.message });
+        }
       }
     }
   }
@@ -836,7 +851,9 @@ export class AmpAcpAgent {
               content: [{ type: 'content', content: { type: 'text', text: 'Tool call was interrupted' } }],
             },
           })
-          .catch(() => {});
+          .catch((e) => {
+            logProtocol.warn('Failed to send tool interruption message', { toolCallId, error: e.message });
+          });
       }
     }
 
@@ -867,10 +884,18 @@ async function readJsonFile(filePath) {
     const parsed = JSON.parse(raw);
     return parsed && typeof parsed === 'object' ? parsed : {};
   } catch (e) {
-    if (e?.code !== 'ENOENT') {
-      logSpawn.warn('Failed to read Amp settings file', { filePath, error: e.message });
+    if (e?.code === 'ENOENT') {
+      // File not found is expected - return empty settings
+      return {};
+    } else if (e instanceof SyntaxError) {
+      // JSON parsing error - corrupted file
+      logSpawn.error('Invalid JSON in Amp settings file', { filePath, error: e.message });
+      return {};
+    } else {
+      // Other I/O errors (permission denied, file locked, etc.)
+      logSpawn.error('Failed to read Amp settings file', { filePath, error: e.message, code: e.code });
+      return {};
     }
-    return {};
   }
 }
 

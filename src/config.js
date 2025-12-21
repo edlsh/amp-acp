@@ -20,9 +20,10 @@ export const config = {
   protocolVersion: 1,
 
   // Nested tool call display mode:
-  // - 'inline': embed child tool calls as consolidated progress in parent's content (default)
-  // - 'separate': emit child tool calls as separate ACP tool_call notifications
-  nestedToolMode: process.env.AMP_ACP_NESTED_MODE || 'inline',
+  // - 'flat': emit all tool calls as independent top-level notifications (default, works with all clients)
+  // - 'inline': embed child tool calls as consolidated progress in parent's content (requires tool_call_update support)
+  // - 'separate': emit child tool calls as separate ACP tool_call notifications with _meta.parentToolCallId
+  nestedToolMode: process.env.AMP_ACP_NESTED_MODE || 'flat',
 
   // Slash command to Amp mode mapping
   commandToMode: {
@@ -69,6 +70,7 @@ export const toolKindMap = {
   // Execution tools
   Bash: 'execute',
   Task: 'execute',
+  TaskOutput: 'read',
 
   // Thinking/analysis tools
   oracle: 'think',
@@ -174,10 +176,13 @@ export function getToolTitle(name, parentToolUseId, input) {
       if (input?.path) return prefix + `Create ${shortenPath(input.path)}`;
       break;
     case 'Task':
-      if (input?.description) return prefix + `Task: ${truncate(input.description, 40)}`;
-      return prefix + 'Spawn Subagent';
+      // Show just the description to match Claude Code style
+      if (input?.description) return prefix + truncate(input.description, 50);
+      return prefix + 'Task';
+    case 'TaskOutput':
+      return prefix + 'TaskOutput';
     case 'oracle':
-      if (input?.task) return prefix + `Oracle: ${truncate(input.task, 40)}`;
+      if (input?.task) return prefix + truncate(input.task, 50);
       return prefix + 'Oracle';
     case 'todo_write':
       return prefix + 'Update Plan';
@@ -266,6 +271,12 @@ export function getInlineToolDescription(name, input) {
       return input?.path ? `Edit ${shortenPath(input.path)}` : 'edit_file';
     case 'create_file':
       return input?.path ? `Create ${shortenPath(input.path)}` : 'create_file';
+    case 'Task':
+      return input?.description ? truncate(input.description, 40) : 'Task';
+    case 'TaskOutput':
+      return 'TaskOutput';
+    case 'oracle':
+      return input?.task ? truncate(input.task, 40) : 'Oracle';
     case 'web_search':
       return input?.query ? `Search: ${truncate(input.query, 30)}` : 'web_search';
     case 'read_web_page':
