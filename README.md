@@ -27,8 +27,7 @@ Use [Amp](https://ampcode.com) from [ACP](https://agentclientprotocol.com/)-comp
          "command": "npx",
          "args": ["-y", "@edlsh/amp-acp@latest"],
          "env": {
-           "AMP_EXECUTABLE": "/usr/local/bin/amp",
-           "AMP_PREFER_SYSTEM_PATH": "1"
+           "AMP_EXECUTABLE": "/usr/local/bin/amp"
          }
        }
      }
@@ -47,12 +46,20 @@ Use [Amp](https://ampcode.com) from [ACP](https://agentclientprotocol.com/)-comp
 
 ## Environment Variables
 
-| Variable                 | Description                                                                                     | Default           |
-| ------------------------ | ----------------------------------------------------------------------------------------------- | ----------------- |
-| `AMP_EXECUTABLE`         | Path to Amp CLI binary                                                                          | `amp`             |
-| `AMP_PREFER_SYSTEM_PATH` | Set to `1` to use system Amp instead of npx version                                             | -                 |
-| `AMP_ACP_TIMEOUT_MS`     | Prompt timeout in milliseconds                                                                  | `600000` (10 min) |
-| `AMP_ACP_NESTED_MODE`    | How to display subagent tool calls: `inline` (embed in parent) or `separate` (individual cards) | `inline`          |
+| Variable              | Description                                                                                     | Default           |
+| --------------------- | ----------------------------------------------------------------------------------------------- | ----------------- |
+| `AMP_EXECUTABLE`      | Path to Amp CLI binary                                                                          | `amp`             |
+| `AMP_ACP_TIMEOUT_MS`  | Prompt timeout in milliseconds                                                                  | `600000` (10 min) |
+| `AMP_ACP_NESTED_MODE` | How to display subagent tool calls: `inline` (embed in parent) or `separate` (individual cards) | `inline`          |
+
+<details>
+<summary><strong>Advanced / Debugging Variables</strong></summary>
+
+| Variable                 | Description                                                                                                                                                                                   |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AMP_PREFER_SYSTEM_PATH` | Set to `1` to strip npx-injected paths from `$PATH` before spawning Amp. Only needed when debugging version conflicts between npx and a locally installed Amp. Most users should ignore this. |
+
+</details>
 
 ## Troubleshooting
 
