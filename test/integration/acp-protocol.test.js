@@ -32,7 +32,7 @@ describe('ACP Protocol Integration', () => {
       });
 
       expect(initResult.protocolVersion).toBeDefined();
-      expect(initResult.agentCapabilities.loadSession).toBe(true);
+      expect(initResult.agentCapabilities.loadSession).toBe(false);
       expect(initResult.agentCapabilities.promptCapabilities.image).toBe(true);
 
       // Create session
@@ -63,31 +63,6 @@ describe('ACP Protocol Integration', () => {
       await expect(
         agent.prompt({ sessionId: 'nonexistent', prompt: [{ type: 'text', text: 'test' }] })
       ).rejects.toThrow('Session not found');
-    });
-  });
-
-  describe('Session Load (Thread Continuation)', () => {
-    it('validates thread ID format', async () => {
-      await expect(agent.loadSession({ sessionId: 'invalid-id', workspaceRoot: '/tmp' })).rejects.toThrow(
-        'Invalid thread ID format'
-      );
-    });
-
-    it('accepts valid thread ID format', async () => {
-      // Mock both methods to avoid actual exec
-      agent._validateThreadExists = vi.fn().mockResolvedValue(true);
-      agent._replayThreadHistory = vi.fn().mockResolvedValue(undefined);
-
-      const result = await agent.loadSession({
-        sessionId: 'T-12345678-1234-1234-1234-123456789abc',
-        workspaceRoot: '/tmp',
-      });
-
-      expect(result.sessionId).toBe('T-12345678-1234-1234-1234-123456789abc');
-      expect(agent.sessions.has(result.sessionId)).toBe(true);
-
-      const session = agent.sessions.get(result.sessionId);
-      expect(session.threadId).toBe('T-12345678-1234-1234-1234-123456789abc');
     });
   });
 

@@ -39,10 +39,11 @@ Use [Amp](https://ampcode.com) from [ACP](https://agentclientprotocol.com/)-comp
 
 ## How it Works
 
-- Streams Amp's JSON over ACP
-- Renders Amp messages and interactions in Zed
+- Streams Amp's JSON output over ACP protocol
+- Renders Amp messages, tool calls, and interactions in Zed's agent panel
 - Tool permissions are handled by Amp (no additional configuration needed)
 - Subagent/Oracle tool calls are displayed inline under the parent task
+- Slash commands (`/plan`, `/code`, `/yolo`) for mode switching
 
 ## Environment Variables
 
@@ -65,7 +66,8 @@ Use [Amp](https://ampcode.com) from [ACP](https://agentclientprotocol.com/)-comp
 
 ## Known Limitations
 
-- **Oracle & Librarian**: These tools are currently experimental in Amp and may not render perfectly in ACP clients. Their output is displayed inline, but interactive features or deep linking might be limited compared to the native Amp TUI because they are server-rendered tool calls rather than client-local interactions.
+- **No thread history/continuation**: Zed's ACP client does not support the `loadSession` capability for external agents, so each session starts fresh. Thread history is only available in Amp's native TUI.
+- **Oracle & Librarian**: These tools are experimental in Amp and may not render perfectly in ACP clients. Their output is displayed inline, but interactive features or deep linking might be limited compared to the native Amp TUI.
 
 ## Credits
 

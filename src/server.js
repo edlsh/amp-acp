@@ -1,5 +1,5 @@
 import { RequestError } from '@agentclientprotocol/sdk';
-import { spawn, execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -70,7 +70,7 @@ export class AmpAcpAgent {
     return {
       protocolVersion: config.protocolVersion,
       agentCapabilities: {
-        loadSession: true,
+        loadSession: false,
         promptCapabilities: { image: true, audio: false, embeddedContext: true },
         mcpCapabilities: { http: false, sse: false },
         sessionCapabilities: {},
@@ -93,7 +93,6 @@ export class AmpAcpAgent {
       activeToolCalls: new Map(),
       currentModeId: 'default',
       terminals: new Map(),
-      threadId: null,
       nestedTracker: new NestedToolTracker(),
       sentAvailableCommands: false,
     });
@@ -142,159 +141,8 @@ export class AmpAcpAgent {
     }
   }
 
-  async _emitThreadInfo(sessionId, threadId) {
-    try {
-      await this.client.sessionUpdate({
-        sessionId,
-        update: {
-          sessionUpdate: 'agent_thought_chunk',
-          content: {
-            type: 'text',
-            text: `Thread: https://ampcode.com/threads/${threadId}`,
-          },
-        },
-      });
-    } catch (e) {
-      logProtocol.warn('Failed to emit thread info', { sessionId, error: e.message });
-    }
-  }
-
   async authenticate(_params) {
     throw RequestError.authRequired();
-  }
-
-  async loadSession(params) {
-    const threadId = params.sessionId;
-
-    // Validate thread ID format
-    if (!threadId || !threadId.startsWith('T-')) {
-      throw new RequestError(-32602, 'Invalid thread ID format. Expected T-<uuid>');
-    }
-
-    // Validate thread exists before creating session
-    const threadExists = await this._validateThreadExists(threadId, params.workspaceRoot);
-    if (!threadExists) {
-      throw new RequestError(-32602, `Thread not found: ${threadId}`);
-    }
-
-    logSession.info('Loading session', { threadId, cwd: params.workspaceRoot });
-
-    // Create session with threadId preset
-    this.sessions.set(threadId, {
-      state: SessionState.IDLE,
-      proc: null,
-      rl: null,
-      cancelled: false,
-      active: false,
-      chain: Promise.resolve(),
-      plan: [],
-      activeToolCalls: new Map(),
-      currentModeId: 'default',
-      terminals: new Map(),
-      threadId,
-      nestedTracker: new NestedToolTracker(),
-      sentAvailableCommands: false,
-    });
-
-    // Fetch and replay history via amp threads markdown
-    await this._replayThreadHistory(threadId, params.workspaceRoot);
-
-    // Defer command emission to ensure session/load response is processed first
-    setImmediate(() => this._emitAvailableCommands(threadId));
-
-    return {
-      sessionId: threadId,
-      models: {
-        currentModelId: 'default',
-        availableModels: [{ modelId: 'default', name: 'Default', description: 'Amp default' }],
-      },
-      modes: {
-        currentModeId: 'default',
-        availableModes: [
-          { id: 'default', name: 'Always Ask', description: 'Prompts for permission on first use of each tool' },
-          {
-            id: 'acceptEdits',
-            name: 'Accept Edits',
-            description: 'Automatically accepts file edit permissions for the session',
-          },
-          { id: 'bypassPermissions', name: 'Bypass Permissions', description: 'Skips all permission prompts' },
-          { id: 'plan', name: 'Plan Mode', description: 'Analyze but not modify files or execute commands' },
-        ],
-      },
-    };
-  }
-
-  async _replayThreadHistory(threadId, cwd) {
-    return new Promise((resolve) => {
-      execFile(
-        config.ampExecutable,
-        ['threads', 'markdown', threadId],
-        { cwd: cwd || process.cwd(), env: buildSpawnEnv(), maxBuffer: 10 * 1024 * 1024 },
-        async (error, stdout, stderr) => {
-          if (error) {
-            logSession.warn('Failed to fetch thread history', { threadId, error: error.message, stderr });
-            // Emit a notice but don't fail - continuation will still work
-            try {
-              await this.client.sessionUpdate({
-                sessionId: threadId,
-                update: {
-                  sessionUpdate: 'agent_thought_chunk',
-                  content: {
-                    type: 'text',
-                    text: 'Note: Could not load full history. Thread continuation is available.',
-                  },
-                },
-              });
-            } catch (e) {
-              logProtocol.warn('Failed to emit history notice', { threadId, error: e.message });
-            }
-            resolve();
-            return;
-          }
-
-          // Emit history as agent message chunks
-          if (stdout && stdout.trim()) {
-            try {
-              await this.client.sessionUpdate({
-                sessionId: threadId,
-                update: {
-                  sessionUpdate: 'agent_message_chunk',
-                  content: { type: 'text', text: stdout },
-                },
-              });
-              logSession.debug('History replayed', { threadId, length: stdout.length });
-            } catch (e) {
-              logProtocol.warn('Failed to emit history', { threadId, error: e.message });
-            }
-          }
-          resolve();
-        }
-      );
-    });
-  }
-
-  /**
-   * Validate that a thread exists by checking with amp threads show
-   * @param {string} threadId - The thread ID to validate
-   * @param {string} cwd - Working directory
-   * @returns {Promise<boolean>} - True if thread exists
-   */
-  async _validateThreadExists(threadId, cwd) {
-    return new Promise((resolve) => {
-      execFile(
-        config.ampExecutable,
-        ['threads', 'show', threadId],
-        { cwd: cwd || process.cwd(), env: buildSpawnEnv(), timeout: 10000 },
-        (error) => {
-          if (error) {
-            logSession.debug('Thread validation failed', { threadId, error: error.message });
-            resolve(false);
-            return;
-          }
-          resolve(true);
-        }
-      );
-    });
   }
 
   async setSessionMode(params) {
@@ -401,18 +249,10 @@ export class AmpAcpAgent {
     };
     connectionSignal?.addEventListener('abort', onConnectionClose);
 
-    // Determine spawn args: use 'threads continue' for sessions with existing threadId
-    const useThreadContinue = s.threadId && s.threadId.startsWith('T-');
-    const spawnArgs = useThreadContinue
-      ? ['threads', 'continue', s.threadId, ...config.ampContinueFlags]
-      : config.ampFlags;
-
-    const finalSpawnArgs = ampSettingsFile ? [...spawnArgs, '--settings-file', ampSettingsFile] : spawnArgs;
+    const finalSpawnArgs = ampSettingsFile ? [...config.ampFlags, '--settings-file', ampSettingsFile] : config.ampFlags;
 
     logSpawn.debug('Spawning amp process', {
       sessionId: params.sessionId,
-      threadId: s.threadId,
-      useThreadContinue,
       cwd,
       modeId: s.currentModeId,
       ampSettingsFile,
@@ -499,17 +339,6 @@ export class AmpAcpAgent {
       }
 
       hadOutput = true;
-
-      // Capture thread ID from Amp's session_id field (present in all messages).
-      // ASSUMPTION: If multiple messages arrive before the first is processed via s.chain,
-      // the first message with session_id wins. This is correct because Amp uses the same
-      // thread ID for all messages in a session.
-      if (msg.session_id && !s.threadId) {
-        s.threadId = msg.session_id;
-        logSession.debug('Thread established', { sessionId: params.sessionId, threadId: msg.session_id });
-        // Emit thread URL for client reference
-        this._emitThreadInfo(params.sessionId, msg.session_id);
-      }
 
       // Handle plan updates from todo_write/todo_read
       if (msg.type === 'assistant' && Array.isArray(msg.message?.content)) {

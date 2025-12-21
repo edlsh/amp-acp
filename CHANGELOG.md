@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.7] - 2025-12-21
+
+### Removed
+
+- Thread history/continuation support (`loadSession`, `_replayThreadHistory`, `_validateThreadExists`) - Zed's ACP client does not support this capability for external agents
+- `ampContinueFlags` config option (no longer needed)
+- Thread ID tracking and emission
+
 ## [0.2.6] - 2025-12-21
 
 ### Added
@@ -114,7 +122,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Connection lifecycle management with abort signal
 - Timeout handling for long-running prompts
 
-[Unreleased]: https://github.com/edlsh/amp-acp/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/edlsh/amp-acp/compare/v0.2.7...HEAD
+[0.2.7]: https://github.com/edlsh/amp-acp/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/edlsh/amp-acp/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/edlsh/amp-acp/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/edlsh/amp-acp/compare/v0.2.3...v0.2.4

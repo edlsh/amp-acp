@@ -105,68 +105,6 @@ describe('AmpAcpAgent', () => {
     });
   });
 
-  describe('loadSession', () => {
-    let agent;
-    let mockClient;
-
-    beforeEach(() => {
-      mockClient = {
-        sessionUpdate: vi.fn().mockResolvedValue({}),
-      };
-      agent = new AmpAcpAgent(mockClient, Promise.resolve(null));
-      // Mock _validateThreadExists to return true (thread exists)
-      agent._validateThreadExists = vi.fn().mockResolvedValue(true);
-      // Mock _replayThreadHistory to avoid actual exec
-      agent._replayThreadHistory = vi.fn().mockResolvedValue(undefined);
-    });
-
-    afterEach(() => {
-      vi.useRealTimers();
-    });
-
-    it('validates thread ID format (T-<uuid>)', async () => {
-      await expect(agent.loadSession({ sessionId: 'invalid-id' })).rejects.toThrow('Invalid thread ID format');
-      await expect(agent.loadSession({ sessionId: '' })).rejects.toThrow('Invalid thread ID format');
-      await expect(agent.loadSession({ sessionId: 'S-12345' })).rejects.toThrow('Invalid thread ID format');
-    });
-
-    it('validates thread exists before creating session', async () => {
-      agent._validateThreadExists = vi.fn().mockResolvedValue(false);
-
-      await expect(agent.loadSession({ sessionId: 'T-nonexistent', workspaceRoot: '/tmp' })).rejects.toThrow(
-        'Thread not found'
-      );
-      expect(agent._validateThreadExists).toHaveBeenCalledWith('T-nonexistent', '/tmp');
-    });
-
-    it('creates session with preset threadId', async () => {
-      vi.useFakeTimers();
-      const threadId = 'T-test-uuid-123';
-      const result = await agent.loadSession({ sessionId: threadId, workspaceRoot: '/tmp' });
-
-      expect(result.sessionId).toBe(threadId);
-
-      const session = agent.sessions.get(threadId);
-      expect(session).toBeDefined();
-      expect(session.threadId).toBe(threadId);
-      expect(session.state).toBe('idle');
-
-      // Flush setImmediate callback from loadSession
-      await vi.runAllTimersAsync();
-    });
-
-    it('replays thread history via amp threads markdown', async () => {
-      vi.useFakeTimers();
-      const threadId = 'T-test-uuid-456';
-      await agent.loadSession({ sessionId: threadId, workspaceRoot: '/home/user/project' });
-
-      expect(agent._replayThreadHistory).toHaveBeenCalledWith(threadId, '/home/user/project');
-
-      // Flush setImmediate callback from loadSession
-      await vi.runAllTimersAsync();
-    });
-  });
-
   describe('slash commands', () => {
     it.todo('intercepts /plan and switches to plan mode');
     it.todo('intercepts /code and switches to default mode');
@@ -249,31 +187,6 @@ describe('AmpAcpAgent', () => {
       });
     });
 
-    it('emits available_commands_update after loadSession', async () => {
-      vi.useFakeTimers();
-
-      // Mock both methods to avoid actual exec
-      agent._validateThreadExists = vi.fn().mockResolvedValue(true);
-      agent._replayThreadHistory = vi.fn().mockResolvedValue(undefined);
-
-      const result = await agent.loadSession({ sessionId: 'T-test-uuid', workspaceRoot: '/tmp' });
-      expect(result.sessionId).toBe('T-test-uuid');
-
-      // Command emission is deferred via setImmediate
-      expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
-
-      // Run setImmediate callbacks
-      await vi.runAllTimersAsync();
-
-      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
-        sessionId: 'T-test-uuid',
-        update: {
-          sessionUpdate: 'available_commands_update',
-          availableCommands: expect.arrayContaining([expect.objectContaining({ name: 'plan' })]),
-        },
-      });
-    });
-
     it('emits only once per session (idempotency)', async () => {
       vi.useFakeTimers();
 
@@ -317,64 +230,6 @@ describe('AmpAcpAgent', () => {
       // Second call should be no-op
       await agent._emitAvailableCommands(sessionId);
       expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1);
-    });
-  });
-
-  describe('_validateThreadExists', () => {
-    let agent;
-    let mockClient;
-
-    beforeEach(() => {
-      mockClient = {
-        sessionUpdate: vi.fn().mockResolvedValue({}),
-      };
-      agent = new AmpAcpAgent(mockClient, Promise.resolve(null));
-    });
-
-    it('returns true for valid thread ID in amp threads list', async () => {
-      // This test requires mocking execAsync, which is complex
-      // For now, we test the integration through loadSession
-      agent._validateThreadExists = vi.fn().mockResolvedValue(true);
-      const result = await agent._validateThreadExists('T-12345678-1234-1234-1234-123456789abc', '/tmp');
-      expect(result).toBe(true);
-    });
-
-    it('returns false for non-existent thread ID', async () => {
-      agent._validateThreadExists = vi.fn().mockResolvedValue(false);
-      const result = await agent._validateThreadExists('T-nonexistent', '/tmp');
-      expect(result).toBe(false);
-    });
-  });
-
-  describe('loadSession integration', () => {
-    let agent;
-    let mockClient;
-
-    beforeEach(() => {
-      mockClient = {
-        sessionUpdate: vi.fn().mockResolvedValue({}),
-      };
-      agent = new AmpAcpAgent(mockClient, Promise.resolve(null));
-    });
-
-    afterEach(() => {
-      vi.useRealTimers();
-    });
-
-    it('accepts valid thread ID format', async () => {
-      vi.useFakeTimers();
-      agent._validateThreadExists = vi.fn().mockResolvedValue(true);
-      agent._replayThreadHistory = vi.fn().mockResolvedValue(undefined);
-
-      const threadId = 'T-12345678-1234-1234-1234-123456789abc';
-      const result = await agent.loadSession({ sessionId: threadId, workspaceRoot: '/tmp' });
-
-      expect(result.sessionId).toBe(threadId);
-      expect(agent._validateThreadExists).toHaveBeenCalledWith(threadId, '/tmp');
-      expect(agent._replayThreadHistory).toHaveBeenCalledWith(threadId, '/tmp');
-
-      // Flush setImmediate callback
-      await vi.runAllTimersAsync();
     });
   });
 });

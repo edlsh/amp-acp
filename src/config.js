@@ -10,9 +10,6 @@ export const config = {
   // Amp CLI flags for new sessions
   ampFlags: ['--execute', '--stream-json', '--no-notifications'],
 
-  // Amp CLI flags appended after 'threads continue <threadId>'
-  ampContinueFlags: ['--execute', '--stream-json', '--no-notifications'],
-
   // Prompt timeout in milliseconds (default: 10 minutes)
   timeoutMs: Number(process.env.AMP_ACP_TIMEOUT_MS) || 10 * 60 * 1000,
 
