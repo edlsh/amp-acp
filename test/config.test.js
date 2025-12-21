@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   config,
   getAmpSettingsOverridesForMode,
@@ -6,6 +6,7 @@ import {
   getToolTitle,
   slashCommands,
   toolKindMap,
+  buildAmpOptions,
 } from '../src/config.js';
 
 describe('getToolKind', () => {
@@ -123,13 +124,20 @@ describe('getToolTitle', () => {
 });
 
 describe('slashCommands', () => {
-  it('contains required commands', () => {
+  it('contains mode commands', () => {
     const names = slashCommands.map((c) => c.name);
     expect(names).toContain('plan');
     expect(names).toContain('code');
     expect(names).toContain('yolo');
-    expect(names).not.toContain('ask');
-    expect(names).not.toContain('architect');
+  });
+
+  it('contains agent commands', () => {
+    const names = slashCommands.map((c) => c.name);
+    expect(names).toContain('oracle');
+    expect(names).toContain('librarian');
+    expect(names).toContain('task');
+    expect(names).toContain('parallel');
+    expect(names).toContain('web');
   });
 
   it('has valid structure', () => {
@@ -143,10 +151,32 @@ describe('slashCommands', () => {
 });
 
 describe('config.commandToMode', () => {
-  it('maps commands to modes', () => {
+  it('maps mode commands to modes', () => {
     expect(config.commandToMode.plan).toBe('plan');
     expect(config.commandToMode.code).toBe('default');
     expect(config.commandToMode.yolo).toBe('bypassPermissions');
+  });
+
+  it('does not include agent commands', () => {
+    expect(config.commandToMode.oracle).toBeUndefined();
+    expect(config.commandToMode.librarian).toBeUndefined();
+    expect(config.commandToMode.task).toBeUndefined();
+  });
+});
+
+describe('config.commandToPrompt', () => {
+  it('maps agent commands to prompt prefixes', () => {
+    expect(config.commandToPrompt.oracle).toContain('Oracle');
+    expect(config.commandToPrompt.librarian).toContain('Librarian');
+    expect(config.commandToPrompt.task).toContain('Task');
+    expect(config.commandToPrompt.parallel).toContain('parallel');
+    expect(config.commandToPrompt.web).toContain('web_search');
+  });
+
+  it('does not include mode commands', () => {
+    expect(config.commandToPrompt.plan).toBeUndefined();
+    expect(config.commandToPrompt.code).toBeUndefined();
+    expect(config.commandToPrompt.yolo).toBeUndefined();
   });
 });
 
@@ -186,5 +216,110 @@ describe('getAmpSettingsOverridesForMode', () => {
     expect(overrides.dangerouslyAllowAll).toBe(false);
     expect(overrides.prependPermissions).toEqual([]);
     expect(overrides.disableTools).toEqual([]);
+  });
+});
+
+describe('config.backend', () => {
+  let originalBackend;
+
+  beforeEach(() => {
+    originalBackend = config.backend;
+  });
+
+  afterEach(() => {
+    config.backend = originalBackend;
+  });
+
+  it('defaults to cli', () => {
+    // Reset to ensure we test the default
+    delete process.env.AMP_ACP_BACKEND;
+    expect(config.backend).toBe('cli');
+  });
+
+  it('can be set to sdk', () => {
+    config.backend = 'sdk';
+    expect(config.backend).toBe('sdk');
+  });
+});
+
+describe('config.sdkEnabled', () => {
+  let originalBackend;
+
+  beforeEach(() => {
+    originalBackend = config.backend;
+  });
+
+  afterEach(() => {
+    config.backend = originalBackend;
+  });
+
+  it('returns true when backend is sdk', () => {
+    config.backend = 'sdk';
+    expect(config.sdkEnabled).toBe(true);
+  });
+
+  it('returns false when backend is cli', () => {
+    config.backend = 'cli';
+    expect(config.sdkEnabled).toBe(false);
+  });
+
+  it('returns false for unknown backend values', () => {
+    config.backend = 'unknown';
+    expect(config.sdkEnabled).toBe(false);
+  });
+});
+
+describe('buildAmpOptions', () => {
+  it('returns default options when no params provided', () => {
+    const options = buildAmpOptions();
+
+    expect(options.cwd).toBe(process.cwd());
+    expect(options.dangerouslyAllowAll).toBe(false);
+    expect(options.toolbox).toBeUndefined();
+    expect(options.prependPermissions).toBeUndefined();
+  });
+
+  it('uses provided cwd', () => {
+    const options = buildAmpOptions({ cwd: '/custom/path' });
+
+    expect(options.cwd).toBe('/custom/path');
+  });
+
+  it('enables dangerouslyAllowAll for bypassPermissions mode', () => {
+    const options = buildAmpOptions({ modeId: 'bypassPermissions' });
+
+    expect(options.dangerouslyAllowAll).toBe(true);
+    expect(options.toolbox).toBeUndefined();
+  });
+
+  it('does not include toolbox for plan mode (SDK limitation)', () => {
+    // Note: SDK only accepts cwd, dangerouslyAllowAll, toolbox (path string).
+    // disableTools and prependPermissions are not supported - SDK reads from settings file.
+    const options = buildAmpOptions({ modeId: 'plan' });
+
+    expect(options.dangerouslyAllowAll).toBe(false);
+    expect(options.toolbox).toBeUndefined(); // SDK doesn't support toolbox.disableTools
+  });
+
+  it('does not include prependPermissions (SDK limitation)', () => {
+    // SDK doesn't support prependPermissions - it reads permissions from settings file
+    const options = buildAmpOptions({ modeId: 'plan' });
+    expect(options.prependPermissions).toBeUndefined();
+  });
+
+  it('does not include prependPermissions for acceptEdits mode (SDK limitation)', () => {
+    // SDK doesn't support prependPermissions - uses settings file
+    const options = buildAmpOptions({ modeId: 'acceptEdits' });
+
+    expect(options.prependPermissions).toBeUndefined();
+    expect(options.dangerouslyAllowAll).toBe(false);
+  });
+
+  it('falls back to default mode for unknown modeId', () => {
+    const options = buildAmpOptions({ modeId: 'unknown' });
+
+    expect(options.dangerouslyAllowAll).toBe(false);
+    expect(options.toolbox).toBeUndefined();
+    expect(options.prependPermissions).toBeUndefined();
   });
 });

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AmpAcpAgent } from '../../src/server.js';
+import { isSdkBackend } from '../../src/backends/index.js';
 
 /**
  * Integration tests for ACP protocol flows.
@@ -32,7 +33,7 @@ describe('ACP Protocol Integration', () => {
       });
 
       expect(initResult.protocolVersion).toBeDefined();
-      expect(initResult.agentCapabilities.loadSession).toBe(false);
+      expect(initResult.agentCapabilities.loadSession).toBe(!isSdkBackend());
       expect(initResult.agentCapabilities.promptCapabilities.image).toBe(true);
 
       // Create session

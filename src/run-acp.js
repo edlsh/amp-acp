@@ -2,6 +2,7 @@ import { AgentSideConnection, ndJsonStream } from '@agentclientprotocol/sdk';
 import { nodeToWebReadable, nodeToWebWritable } from './utils.js';
 import { AmpAcpAgent } from './server.js';
 import { createLogger } from './logger.js';
+import { validateBackend } from './backends/index.js';
 
 const log = createLogger('acp:conn');
 const protocolLog = createLogger('acp:wire');
@@ -9,7 +10,9 @@ const protocolLog = createLogger('acp:wire');
 // Debug: log all outgoing messages
 const DEBUG_WIRE = process.env.AMP_ACP_DEBUG_WIRE === '1';
 
-export function runAcp() {
+export async function runAcp() {
+  // Validate backend configuration at startup (fail fast if SDK missing)
+  await validateBackend();
   let wrappedStdout = process.stdout;
 
   if (DEBUG_WIRE) {

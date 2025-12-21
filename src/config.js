@@ -1,5 +1,9 @@
 // Centralized configuration for amp-acp adapter
 
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+
 export const config = {
   // Amp CLI binary path
   ampExecutable: process.env.AMP_EXECUTABLE || 'amp',
@@ -22,24 +26,89 @@ export const config = {
   // - 'separate': emit child tool calls as separate ACP tool_call notifications with _meta.parentToolCallId
   nestedToolMode: process.env.AMP_ACP_NESTED_MODE || 'flat',
 
+  // Backend mode: 'cli' spawns amp process, 'sdk' uses @sourcegraph/amp-sdk
+  backend: process.env.AMP_ACP_BACKEND || 'cli',
+
   // Slash command to Amp mode mapping
   commandToMode: {
     plan: 'plan',
     code: 'default',
     yolo: 'bypassPermissions',
   },
+
+  // Slash command to prompt prefix mapping (triggers specific tools)
+  commandToPrompt: {
+    oracle:
+      'Use the Oracle tool to help with this task. Consult the Oracle for expert analysis, planning, or debugging:\n\n',
+    librarian:
+      'Use the Librarian tool to explore and understand code. Ask the Librarian to analyze repositories on GitHub:\n\n',
+    task: 'Use the Task tool to spawn a subagent for this multi-step implementation. Provide detailed instructions:\n\n',
+    parallel:
+      'Spawn multiple Task subagents to work on these independent tasks in parallel. Each task should be self-contained:\n\n',
+    web: 'Use web_search and read_web_page tools to find information about:\n\n',
+  },
+
+  // Computed property: whether SDK backend is enabled
+  get sdkEnabled() {
+    return this.backend === 'sdk';
+  },
 };
 
 // Slash commands exposed to ACP clients
 export const slashCommands = [
+  // Mode commands (permission control)
   {
     name: 'plan',
-    description: 'Switch to plan mode (read-only analysis)',
+    description: 'Switch to read-only analysis mode (disables modifying tools)',
     input: { hint: 'Optional follow-up prompt' },
   },
-  { name: 'code', description: 'Switch to code mode (default)', input: { hint: 'Optional follow-up prompt' } },
-  { name: 'yolo', description: 'Bypass all permission prompts', input: { hint: 'Optional follow-up prompt' } },
+  {
+    name: 'code',
+    description: 'Switch to default mode (uses your amp.permissions settings)',
+    input: { hint: 'Optional follow-up prompt' },
+  },
+  {
+    name: 'yolo',
+    description: 'Bypass all permission prompts (dangerouslyAllowAll)',
+    input: { hint: 'Optional follow-up prompt' },
+  },
+
+  // Agent commands (trigger specialized tools)
+  {
+    name: 'oracle',
+    description: 'Consult the Oracle for planning, review, or debugging',
+    input: { hint: 'What should the Oracle analyze?' },
+  },
+  {
+    name: 'librarian',
+    description: 'Ask the Librarian to explore codebases on GitHub',
+    input: { hint: 'What repository or code do you want to understand?' },
+  },
+  {
+    name: 'task',
+    description: 'Spawn a Task subagent for multi-file implementation',
+    input: { hint: 'Describe the task to delegate' },
+  },
+  {
+    name: 'parallel',
+    description: 'Run multiple subagents in parallel',
+    input: { hint: 'Describe independent tasks to parallelize' },
+  },
+  {
+    name: 'web',
+    description: 'Search the web for documentation or information',
+    input: { hint: 'What do you want to search for?' },
+  },
 ];
+
+/**
+ * Check if a tool name is a file edit/create tool that produces diffs.
+ * @param {string} toolName - Tool name from Amp
+ * @returns {boolean} - True if this tool produces file modifications
+ */
+export function isFileEditTool(toolName) {
+  return toolName === 'edit_file' || toolName === 'create_file';
+}
 
 // Tool name to ACP ToolKind mapping (spec-compliant values only)
 // Valid kinds: read, edit, delete, move, search, execute, think, fetch, switch_mode, other
@@ -299,4 +368,130 @@ export function buildSpawnEnv() {
     env.PATH = parts.join(separator);
   }
   return env;
+}
+
+/**
+ * Build AmpOptions for SDK execute() call.
+ *
+ * Note: The amp-sdk only accepts a limited set of options:
+ * - cwd: string (working directory)
+ * - dangerouslyAllowAll: boolean (bypass all permission checks)
+ * - toolbox: string (path to custom toolbox directory)
+ *
+ * User permissions (amp.permissions) and disabled tools (amp.tools.disable) are
+ * NOT supported by the SDK - it reads these from the user's settings file directly.
+ * Mode-based permission overrides only work for dangerouslyAllowAll.
+ *
+ * @param {Object} params
+ * @param {string} [params.modeId] - Mode identifier (plan, default, bypassPermissions, acceptEdits)
+ * @param {string} [params.cwd] - Working directory
+ * @param {Object} [params.clientCapabilities] - ACP client capabilities (reserved for future use)
+ * @param {Object} [params.userSettings] - Merged user settings (unused - SDK reads settings directly)
+ * @returns {Object} AmpOptions object for SDK
+ */
+export function buildAmpOptions({
+  modeId,
+  cwd,
+  threadId,
+  clientCapabilities: _clientCapabilities,
+  userSettings: _userSettings,
+} = {}) {
+  const settings = getAmpSettingsOverridesForMode(modeId || 'default');
+
+  // SDK accepts: cwd, dangerouslyAllowAll, continue (for thread continuation)
+  // Permissions and disabled tools are read from user's settings file by SDK
+  const options = {
+    cwd: cwd || process.cwd(),
+    dangerouslyAllowAll: settings.dangerouslyAllowAll,
+  };
+
+  // Pass thread ID to continue the conversation (enables persistent memory)
+  if (threadId) {
+    options.continue = threadId;
+  }
+
+  return options;
+}
+
+/**
+ * Get the default Amp settings file path.
+ * @returns {string|null}
+ */
+export function getDefaultAmpSettingsPath() {
+  if (process.env.AMP_SETTINGS_FILE) return process.env.AMP_SETTINGS_FILE;
+  const home = os.homedir?.() || process.env.HOME;
+  if (!home) return null;
+  return path.join(home, '.config', 'amp', 'settings.json');
+}
+
+/**
+ * Read and parse a JSON file, returning empty object on missing/invalid files.
+ * @param {string|null} filePath
+ * @param {Object} [logger] - Optional logger for error reporting
+ * @returns {Promise<Object>}
+ */
+export async function readJsonFile(filePath, logger) {
+  if (!filePath) return {};
+  try {
+    const raw = await fs.readFile(filePath, 'utf8');
+    if (!raw.trim()) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (e) {
+    if (e?.code === 'ENOENT') {
+      return {};
+    } else if (e instanceof SyntaxError) {
+      logger?.error?.('Invalid JSON in Amp settings file', { filePath, error: e.message });
+      return {};
+    } else {
+      logger?.error?.('Failed to read Amp settings file', { filePath, error: e.message, code: e.code });
+      return {};
+    }
+  }
+}
+
+/**
+ * Load and merge user Amp settings with mode overrides.
+ * Reads from ~/.config/amp/settings.json and <cwd>/.amp/settings.json,
+ * then applies mode-specific overrides.
+ *
+ * @param {string} cwd - Working directory
+ * @param {string} modeId - Mode identifier
+ * @param {Object} [logger] - Optional logger for error reporting
+ * @returns {Promise<Object>} Merged settings object
+ */
+export async function loadMergedAmpSettings(cwd, modeId, logger) {
+  const overrides = getAmpSettingsOverridesForMode(modeId);
+
+  const baseSettings = {
+    ...(await readJsonFile(getDefaultAmpSettingsPath(), logger)),
+    ...(await readJsonFile(path.join(cwd, '.amp', 'settings.json'), logger)),
+  };
+
+  const merged = { ...baseSettings };
+  merged['amp.dangerouslyAllowAll'] = overrides.dangerouslyAllowAll;
+
+  if (Array.isArray(overrides.prependPermissions) && overrides.prependPermissions.length > 0) {
+    const existing = Array.isArray(merged['amp.permissions']) ? merged['amp.permissions'] : [];
+    merged['amp.permissions'] = [...overrides.prependPermissions, ...existing];
+  }
+
+  if (Array.isArray(overrides.disableTools) && overrides.disableTools.length > 0) {
+    const existing = Array.isArray(merged['amp.tools.disable']) ? merged['amp.tools.disable'] : [];
+    merged['amp.tools.disable'] = uniqStrings([...existing, ...overrides.disableTools]);
+  }
+
+  return merged;
+}
+
+function uniqStrings(values) {
+  const out = [];
+  const seen = new Set();
+  for (const v of values) {
+    if (!seen.has(v)) {
+      seen.add(v);
+      out.push(v);
+    }
+  }
+  return out;
 }

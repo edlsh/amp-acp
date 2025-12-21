@@ -12,7 +12,10 @@ process.on('uncaughtException', (err) => {
 
 import { runAcp } from './run-acp.js';
 
-runAcp();
+runAcp().catch((err) => {
+  rootLog.error('Startup failed', { error: err.message });
+  process.exit(1);
+});
 
 // Keep process alive
 process.stdin.resume();

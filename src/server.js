@@ -1,30 +1,28 @@
 import { RequestError } from '@agentclientprotocol/sdk';
-import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import readline from 'node:readline';
-// P2.1 backpressure: imported but not yet integrated (requires readline replacement)
-import { pipeline as _pipeline } from 'node:stream/promises';
-import _split2 from 'split2';
 import { toAcpNotifications, isBashToolUse, getToolResult, NestedToolTracker } from './to-acp.js';
-import { config, buildSpawnEnv, slashCommands, getAmpSettingsOverridesForMode } from './config.js';
+import { sdkMessageToAcpNotifications, extractSdkTerminalAndPlanActions } from './sdk-adapter.js';
+import { config, slashCommands, loadMergedAmpSettings } from './config.js';
+import { getBackend, isSdkBackend } from './backends/index.js';
+import { getThreadHistory, continueThread } from './backends/cli-backend.js';
 import { createLogger } from './logger.js';
-import { CircuitBreaker } from './circuit-breaker.js';
+
 const logSession = createLogger('acp:session');
 const logProtocol = createLogger('acp:protocol');
 const logSpawn = createLogger('amp:spawn');
-const logStderr = createLogger('amp:stderr');
 
-// Global spawn circuit breaker - protects against repeated spawn failures
-const spawnBreaker = new CircuitBreaker({
-  name: 'amp-spawn',
-  failureThreshold: 5,
-  resetTimeMs: 30000, // 30 seconds
-});
-
-// Session state machine
+/**
+ * Session state machine for AmpAcpAgent.
+ *
+ * State transitions:
+ * - IDLE → ACTIVE: on prompt() call
+ * - ACTIVE → IDLE: on prompt completion (success or cancellation)
+ * - ACTIVE → FAILED: on unrecoverable error (e.g., spawn failure)
+ * - FAILED: terminal state, session cannot accept new prompts
+ */
 const SessionState = {
   IDLE: 'idle',
   ACTIVE: 'active',
@@ -34,17 +32,10 @@ const SessionState = {
 export class AmpAcpAgent {
   constructor(client, connectionSignalPromise) {
     this.client = client;
-    // connectionSignalPromise resolves to AbortSignal after connection is fully initialized
     this.connectionSignalPromise = connectionSignalPromise;
     this.sessions = new Map();
   }
 
-  /**
-   * Wrapper for sessionUpdate with severity classification
-   * @param {object} notif - The notification to send
-   * @param {object} options - Options
-   * @param {boolean} options.critical - If true, throw on failure; if false, log warning only
-   */
   async _sessionUpdate(notif, { critical = false } = {}) {
     try {
       await this.client.sessionUpdate(notif);
@@ -70,7 +61,7 @@ export class AmpAcpAgent {
     return {
       protocolVersion: config.protocolVersion,
       agentCapabilities: {
-        loadSession: false,
+        loadSession: !isSdkBackend(), // Only CLI backend supports thread loading
         promptCapabilities: { image: true, audio: false, embeddedContext: true },
         mcpCapabilities: { http: false, sse: false },
         sessionCapabilities: {},
@@ -95,13 +86,97 @@ export class AmpAcpAgent {
       terminals: new Map(),
       nestedTracker: new NestedToolTracker(),
       sentAvailableCommands: false,
+      threadId: null,
+      isLoaded: false,
     });
 
     logSession.info('Session created', { sessionId });
-
-    // Defer command emission to ensure session/new response is processed first
     setImmediate(() => this._emitAvailableCommands(sessionId));
 
+    return this._buildSessionResponse(sessionId);
+  }
+
+  /**
+   * Load an existing Amp thread as a session.
+   * @param {Object} params - Load session parameters
+   * @param {string} params.sessionId - Amp thread ID (T-xxx format)
+   * @param {string} [params.cwd] - Working directory
+   * @returns {Promise<Object>} - Session info
+   */
+  async loadSession(params) {
+    const threadId = params.sessionId;
+    const cwd = params.cwd || process.cwd();
+
+    // Validate thread ID format: T-{uuid}
+    const threadIdPattern = /^T-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!threadIdPattern.test(threadId)) {
+      throw new RequestError(-32602, `Invalid thread ID format: ${threadId}. Expected T-{uuid} format.`);
+    }
+
+    // SDK backend limitation: thread operations require CLI.
+    // The amp-sdk does not yet expose thread retrieval/continuation APIs.
+    // Once amp-sdk adds these APIs, this restriction can be removed.
+    if (isSdkBackend()) {
+      throw new RequestError(
+        -32002,
+        'Thread history is not available with SDK backend. ' +
+          'Set AMP_ACP_BACKEND=cli for thread support, or wait for amp-sdk to add thread APIs.'
+      );
+    }
+
+    // Fetch thread history to validate thread exists
+    const markdown = await getThreadHistory(threadId, { cwd });
+    if (markdown === null) {
+      throw new RequestError(-32002, `Thread not found: ${threadId}`);
+    }
+
+    // Create session state
+    const sessionId = threadId; // Use thread ID as session ID for continuation
+    this.sessions.set(sessionId, {
+      state: SessionState.IDLE,
+      proc: null,
+      rl: null,
+      cancelled: false,
+      active: false,
+      chain: Promise.resolve(),
+      plan: [],
+      activeToolCalls: new Map(),
+      currentModeId: 'default',
+      terminals: new Map(),
+      nestedTracker: new NestedToolTracker(),
+      sentAvailableCommands: false,
+      threadId,
+      isLoaded: true,
+      loadedCwd: cwd,
+    });
+
+    logSession.info('Session loaded from thread', { sessionId, threadId });
+    setImmediate(() => this._emitAvailableCommands(sessionId));
+
+    // Replay thread history as agent_message_chunk notifications
+    if (markdown.trim()) {
+      setImmediate(async () => {
+        try {
+          await this.client.sessionUpdate({
+            sessionId,
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: markdown },
+            },
+          });
+        } catch (e) {
+          logProtocol.warn('Failed to replay thread history', { sessionId, error: e.message });
+        }
+      });
+    }
+
+    return this._buildSessionResponse(sessionId);
+  }
+
+  /**
+   * Build standard session response object.
+   */
+  _buildSessionResponse(sessionId) {
     return {
       sessionId,
       models: {
@@ -111,14 +186,26 @@ export class AmpAcpAgent {
       modes: {
         currentModeId: 'default',
         availableModes: [
-          { id: 'default', name: 'Always Ask', description: 'Prompts for permission on first use of each tool' },
+          {
+            id: 'default',
+            name: 'Default',
+            description: 'Prompts for permission based on your amp.permissions settings',
+          },
           {
             id: 'acceptEdits',
-            name: 'Accept Edits',
-            description: 'Automatically accepts file edit permissions for the session',
+            name: 'Auto-accept File Changes',
+            description: 'Automatically allows file create/edit/delete without prompting',
           },
-          { id: 'bypassPermissions', name: 'Bypass Permissions', description: 'Skips all permission prompts' },
-          { id: 'plan', name: 'Plan Mode', description: 'Analyze but not modify files or execute commands' },
+          {
+            id: 'bypassPermissions',
+            name: 'Bypass Permissions',
+            description: 'Skips all permission prompts (dangerouslyAllowAll)',
+          },
+          {
+            id: 'plan',
+            name: 'Plan Mode',
+            description: 'Read-only analysis mode - tools that modify files are disabled',
+          },
         ],
       },
     };
@@ -150,7 +237,6 @@ export class AmpAcpAgent {
     if (s) {
       s.currentModeId = params.modeId;
       logSession.debug('Mode changed', { sessionId: params.sessionId, modeId: params.modeId });
-      // Emit mode update notification
       try {
         await this.client.sessionUpdate({
           sessionId: params.sessionId,
@@ -170,11 +256,22 @@ export class AmpAcpAgent {
     return {};
   }
 
+  /**
+   * Handle a prompt request from the ACP client.
+   *
+   * Flow:
+   * 1. Validate session state (reject if FAILED)
+   * 2. Process slash commands (mode switching)
+   * 3. Save images to temp files for attachment
+   * 4. Execute via configured backend (CLI or SDK)
+   * 5. Stream notifications to client
+   * 6. Cleanup and return stop reason
+   */
   async prompt(params) {
     const s = this.sessions.get(params.sessionId);
     if (!s) throw new RequestError(-32002, 'Session not found');
 
-    // Block prompts on failed sessions
+    // Block prompts on sessions that have entered failed state
     if (s.state === SessionState.FAILED) {
       throw new RequestError(-32002, 'Session is in failed state and cannot accept new prompts');
     }
@@ -182,10 +279,8 @@ export class AmpAcpAgent {
     s.state = SessionState.ACTIVE;
     s.cancelled = false;
     s.active = true;
-    s.activeToolCalls.clear();
-    s.nestedTracker.clear();
 
-    // Periodic cleanup of stale tool calls (older than 30 minutes)
+    // Cleanup stale tool calls (>30 min old) before clearing
     const staleThreshold = Date.now() - 30 * 60 * 1000;
     for (const [toolCallId, toolCall] of s.activeToolCalls) {
       if (toolCall.startTime < staleThreshold) {
@@ -199,70 +294,22 @@ export class AmpAcpAgent {
       }
     }
 
-    const cwd = params.cwd || process.cwd();
+    s.activeToolCalls.clear();
+    s.nestedTracker.clear();
+
+    const cwd = s.loadedCwd || params.cwd || process.cwd();
     let ampSettingsFile = null;
 
-    // Self-healing fallback: emit commands if not yet sent
     if (!s.sentAvailableCommands) {
       this._emitAvailableCommands(params.sessionId);
     }
 
-    let procEnded = false;
-    let hadOutput = false;
-    let spawnError = null;
-
-    // Check for slash command BEFORE saving images to avoid temp file leaks on early returns
-    let textInput = this._buildTextInput(params.prompt);
-
-    const commandMatch = textInput.trim().match(/^\/(\w+)(?:\s+(.*))?$/s);
-    if (commandMatch) {
-      const [, cmdName, cmdArg] = commandMatch;
-      const modeId = config.commandToMode[cmdName];
-      if (modeId) {
-        await this.setSessionMode({ sessionId: params.sessionId, modeId });
-        // If there's additional text after the command, use that as the prompt
-        if (cmdArg?.trim()) {
-          textInput = cmdArg.trim() + '\n';
-        } else {
-          // Just the command, acknowledge and return
-          await this.client.sessionUpdate({
-            sessionId: params.sessionId,
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: `Switched to ${modeId} mode.` },
-            },
-          });
-          s.active = false;
-          return { stopReason: 'end_turn' };
-        }
-      }
-    }
-
-    ampSettingsFile = await this._createAmpSettingsFileForMode(cwd, s.currentModeId);
-
-    // Create AbortController for this prompt, linked to connection signal
-    const abortController = new AbortController();
-    // Await the deferred signal promise (resolves after connection is fully initialized)
-    const connectionSignal = await this.connectionSignalPromise;
-    const onConnectionClose = () => {
-      logSpawn.warn('Connection closed, aborting prompt', { sessionId: params.sessionId });
-      abortController.abort();
-    };
-    connectionSignal?.addEventListener('abort', onConnectionClose);
-
-    const finalSpawnArgs = ampSettingsFile ? [...config.ampFlags, '--settings-file', ampSettingsFile] : config.ampFlags;
-
-    logSpawn.debug('Spawning amp process', {
-      sessionId: params.sessionId,
-      cwd,
-      modeId: s.currentModeId,
-      ampSettingsFile,
-    });
-
-    // Check circuit breaker before spawning
-    if (!spawnBreaker.isAllowed()) {
-      logSpawn.warn('Circuit breaker is open, rejecting spawn', { sessionId: params.sessionId });
+    // Get the configured backend and check circuit breaker BEFORE allocating resources
+    const backend = getBackend();
+    if (!backend.isAllowed()) {
+      logSpawn.warn('Backend not allowed (circuit breaker open)', { sessionId: params.sessionId });
       s.state = SessionState.FAILED;
+      s.active = false;
       await this.client
         .sessionUpdate({
           sessionId: params.sessionId,
@@ -277,14 +324,74 @@ export class AmpAcpAgent {
       return { stopReason: 'refusal' };
     }
 
-    // Save images to temp files AFTER all early return paths to prevent resource leaks
+    let hadOutput = false;
+
+    // Handle slash commands
+    let textInput = this._buildTextInput(params.prompt);
+    const commandMatch = textInput.trim().match(/^\/(\w+)(?:\s+(.*))?$/s);
+    if (commandMatch) {
+      const [, cmdName, cmdArg] = commandMatch;
+
+      // Mode commands (change permission settings)
+      const modeId = config.commandToMode[cmdName];
+      if (modeId) {
+        await this.setSessionMode({ sessionId: params.sessionId, modeId });
+        if (cmdArg?.trim()) {
+          textInput = cmdArg.trim() + '\n';
+        } else {
+          await this.client.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: `Switched to ${modeId} mode.` },
+            },
+          });
+          s.active = false;
+          return { stopReason: 'end_turn' };
+        }
+      }
+
+      // Agent commands (prepend prompt to trigger specific tools)
+      const promptPrefix = config.commandToPrompt[cmdName];
+      if (promptPrefix) {
+        if (!cmdArg?.trim()) {
+          await this.client.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: `Usage: /${cmdName} <your request>` },
+            },
+          });
+          s.active = false;
+          return { stopReason: 'end_turn' };
+        }
+        textInput = promptPrefix + cmdArg.trim() + '\n';
+        logSession.debug('Agent command applied', { sessionId: params.sessionId, command: cmdName });
+      }
+    }
+
+    // Create settings file for CLI backend (SDK uses buildAmpOptions instead)
+    if (!isSdkBackend()) {
+      ampSettingsFile = await this._createAmpSettingsFileForMode(cwd, s.currentModeId);
+    }
+
+    // Create AbortController for this prompt
+    const abortController = new AbortController();
+    s.abortController = abortController; // Store on session for cancel() access
+    const connectionSignal = await this.connectionSignalPromise;
+    const onConnectionClose = () => {
+      logSpawn.warn('Connection closed, aborting prompt', { sessionId: params.sessionId });
+      abortController.abort();
+    };
+    connectionSignal?.addEventListener('abort', onConnectionClose);
+
+    // Save images to temp files
     const {
       paths: imagePaths,
       cleanup: cleanupImages,
       failedImages,
     } = await this._saveImagesToTempFiles(params.prompt);
 
-    // Append image file paths to text input
     if (imagePaths.length > 0) {
       textInput += '\n\n[Attached images:]\n';
       for (const imgPath of imagePaths) {
@@ -292,7 +399,6 @@ export class AmpAcpAgent {
       }
     }
 
-    // Inform agent about failed image attachments
     if (failedImages.length > 0) {
       textInput += '\n\n[Warning: Some image attachments failed to load:]\n';
       for (const f of failedImages) {
@@ -300,131 +406,24 @@ export class AmpAcpAgent {
       }
     }
 
-    const proc = spawn(config.ampExecutable, finalSpawnArgs, {
-      cwd,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: buildSpawnEnv(),
-    });
+    // Plan mode: inject system instruction for robustness (hybrid approach)
+    // This supplements the tool disabling with explicit prompting
+    if (s.currentModeId === 'plan') {
+      const planPrefix =
+        '[PLAN MODE ACTIVE: You are in read-only analysis mode. ' +
+        'Analyze, research, and plan but do NOT write code or modify files. ' +
+        'If the user asks you to implement something, explain your plan instead.]\n\n';
+      textInput = planPrefix + textInput;
+    }
 
-    proc.on('error', (err) => {
-      spawnError = err;
-      spawnBreaker.recordFailure(); // Record spawn failure
-      s.state = SessionState.FAILED; // Transition to failed state on spawn error
-      logSpawn.error('Failed to spawn amp', { sessionId: params.sessionId, error: err.message });
-      if (!procEnded) {
-        procEnded = true;
-        this.client
-          .sessionUpdate({
-            sessionId: params.sessionId,
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: `Error: Failed to start amp: ${err.message}` },
-            },
-          })
-          .catch((e) => {
-            logProtocol.warn('Failed to send amp start error message', {
-              sessionId: params.sessionId,
-              error: e.message,
-            });
-          });
-      }
-    });
-
-    const rlOut = readline.createInterface({ input: proc.stdout });
-    const rlErr = readline.createInterface({ input: proc.stderr });
-
-    s.proc = proc;
-    s.rl = rlOut;
-
-    const processLine = async (line) => {
-      if (!line) return;
-      let msg;
-      try {
-        msg = JSON.parse(line);
-      } catch (e) {
-        logProtocol.debug('Failed to parse JSON line', {
-          sessionId: params.sessionId,
-          line: line.substring(0, 200),
-          error: e.message,
-        });
-        hadOutput = true;
-        try {
-          await this.client.sessionUpdate({
-            sessionId: params.sessionId,
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: line },
-            },
-          });
-        } catch (e) {
-          logProtocol.warn('sessionUpdate failed', { sessionId: params.sessionId, error: e.message });
-        }
-        return;
-      }
-
-      hadOutput = true;
-
-      // Handle plan updates from todo_write/todo_read
-      if (msg.type === 'assistant' && Array.isArray(msg.message?.content)) {
-        for (const chunk of msg.message.content) {
-          if (chunk.type === 'tool_use' && (chunk.name === 'todo_write' || chunk.name === 'todo_read')) {
-            this._handlePlanToolUse(params.sessionId, s, chunk);
-          }
-          // Handle Terminal API for Bash tool
-          if (this.clientCapabilities?.terminal && isBashToolUse(chunk)) {
-            await this._createTerminalForBash(params.sessionId, s, chunk);
-          }
-        }
-      }
-
-      // Handle terminal release on tool result
-      if (msg.type === 'user' && Array.isArray(msg.message?.content)) {
-        for (const chunk of msg.message.content) {
-          const toolResult = getToolResult(chunk);
-          if (toolResult && s.terminals.has(toolResult.toolUseId)) {
-            await this._releaseTerminal(s, toolResult.toolUseId);
-          }
-        }
-      }
-
-      const notifications = toAcpNotifications(
-        msg,
-        params.sessionId,
-        s.activeToolCalls,
-        this.clientCapabilities,
-        s.nestedTracker
-      );
-      for (const notif of notifications) {
-        try {
-          await this.client.sessionUpdate(notif);
-        } catch (e) {
-          logProtocol.warn('sessionUpdate failed', { sessionId: params.sessionId, error: e.message });
-        }
-      }
-    };
-
-    rlOut.on('line', (line) => {
-      s.chain = s.chain
-        .then(() => processLine(line))
-        .catch((e) => {
-          logProtocol.error('Line processing error', { sessionId: params.sessionId, error: e.message });
-        });
-    });
-
-    rlErr.on('line', (line) => {
-      logStderr.debug('amp stderr', { sessionId: params.sessionId, line });
-    });
-
-    if (!textInput.endsWith('\n')) textInput += '\n';
-
-    proc.stdin.on('error', (err) => {
-      logSpawn.warn('stdin error', { sessionId: params.sessionId, error: err.message });
-    });
-    proc.stdin.write(textInput);
-    proc.stdin.end();
-
-    // Timer reference for cleanup
+    // Timeout handling
     let timeoutTimer = null;
+    let timedOut = false;
+    timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      abortController.abort();
+    }, config.timeoutMs);
+
     const clearTimeoutTimer = () => {
       if (timeoutTimer) {
         clearTimeout(timeoutTimer);
@@ -433,48 +432,60 @@ export class AmpAcpAgent {
     };
 
     try {
-      const result = await Promise.race([
-        new Promise((resolve) => {
-          proc.on('close', (code, signal) => {
-            procEnded = true;
-            clearTimeoutTimer();
-            safeClose(rlOut);
-            safeClose(rlErr);
-            // Record success on normal close (exit code 0)
-            if (code === 0) {
-              spawnBreaker.recordSuccess();
-            }
-            s.chain.then(() => resolve({ type: 'closed', code, signal }));
-          });
-        }),
-        new Promise((resolve) => {
-          timeoutTimer = setTimeout(() => resolve({ type: 'timeout' }), config.timeoutMs);
-        }),
-        new Promise((resolve) => {
-          abortController.signal.addEventListener('abort', () => {
-            clearTimeoutTimer();
-            resolve({ type: 'connection_closed' });
-          });
-        }),
-      ]);
+      const backendOptions = {
+        cwd,
+        ampSettingsFile,
+        modeId: s.currentModeId,
+        sessionId: params.sessionId,
+        clientCapabilities: this.clientCapabilities,
+      };
 
-      if (result.type === 'connection_closed') {
-        logSpawn.warn('Connection closed during prompt, killing process', { sessionId: params.sessionId });
-        await gracefulKill(proc, 2000); // 2s grace for connection close
-        safeClose(rlOut);
-        safeClose(rlErr);
-        // Wait for queued event processing to complete before returning
-        await s.chain;
-        this._cleanupSession(params.sessionId);
-        return { stopReason: 'cancelled' };
+      // Use continueThread for loaded sessions, executePrompt for new sessions
+      // Note: Thread continuation only works with CLI backend; SDK backend doesn't support it yet
+      const generator =
+        s.threadId && !isSdkBackend()
+          ? continueThread(s, s.threadId, textInput, backendOptions, abortController.signal)
+          : backend.executePrompt(s, textInput, backendOptions, abortController.signal);
+
+      // Process messages from backend
+      for await (const item of generator) {
+        if (timedOut) break;
+        if (abortController.signal.aborted) break;
+
+        hadOutput = true;
+
+        if (isSdkBackend()) {
+          // SDK backend yields { type: 'sdk_message', msg } or { type: 'sdk_error', error }
+          if (item.type === 'sdk_error') {
+            logSpawn.error('SDK execution error during iteration', {
+              sessionId: params.sessionId,
+              error: item.error?.message,
+            });
+            await this.client
+              .sessionUpdate({
+                sessionId: params.sessionId,
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: `Error: ${item.error?.message || 'SDK execution failed'}` },
+                },
+              })
+              .catch((e) => {
+                logProtocol.warn('Failed to send SDK error message', { sessionId: params.sessionId, error: e.message });
+              });
+            break;
+          }
+          await this._processSdkMessage(params.sessionId, s, item.msg);
+        } else {
+          // CLI backend yields { type: 'message', msg } or { type: 'text', text }
+          await this._processCliMessage(params.sessionId, s, item);
+        }
       }
 
-      if (result.type === 'timeout') {
+      clearTimeoutTimer();
+
+      // Check for timeout
+      if (timedOut) {
         logSpawn.error('Process timed out', { sessionId: params.sessionId, timeoutMs: config.timeoutMs });
-        await gracefulKill(proc, 3000); // 3s grace for timeout
-        safeClose(rlOut);
-        safeClose(rlErr);
-        // Wait for queued event processing to complete before returning
         await s.chain;
         await this.client
           .sessionUpdate({
@@ -490,8 +501,11 @@ export class AmpAcpAgent {
         return { stopReason: 'refusal' };
       }
 
-      if (spawnError) {
-        return { stopReason: 'refusal' };
+      // Handle abort (connection closed)
+      if (abortController.signal.aborted) {
+        await s.chain;
+        this._cleanupSession(params.sessionId);
+        return { stopReason: 'cancelled' };
       }
 
       if (s.cancelled) {
@@ -499,19 +513,34 @@ export class AmpAcpAgent {
       }
 
       return { stopReason: hadOutput ? 'end_turn' : 'refusal' };
+    } catch (err) {
+      logSpawn.error('Backend execution error', { sessionId: params.sessionId, error: err.message });
+      await s.chain;
+      await this.client
+        .sessionUpdate({
+          sessionId: params.sessionId,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `Error: Failed to start amp - ${err.message}` },
+          },
+        })
+        .catch((e) => {
+          logProtocol.warn('Failed to send error message', { sessionId: params.sessionId, error: e.message });
+        });
+      s.state = SessionState.FAILED;
+      return { stopReason: 'refusal' };
     } finally {
+      clearTimeoutTimer();
       connectionSignal?.removeEventListener('abort', onConnectionClose);
       s.active = false;
       s.cancelled = false;
       s.proc = null;
       s.rl = null;
 
-      // Reset to IDLE unless session is in FAILED state
       if (s.state !== SessionState.FAILED) {
         s.state = SessionState.IDLE;
       }
 
-      // Release all terminals at end of prompt (guaranteed cleanup)
       await this._releaseAllTerminals(s);
 
       if (ampSettingsFile) {
@@ -522,32 +551,138 @@ export class AmpAcpAgent {
         }
       }
 
-      // Cleanup temp image files
       await cleanupImages();
     }
   }
 
+  /**
+   * Process a CLI backend message.
+   */
+  async _processCliMessage(sessionId, session, item) {
+    if (item.type === 'text' || item.type === 'error') {
+      // Non-JSON line or error message
+      await this.client
+        .sessionUpdate({
+          sessionId,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: item.text },
+          },
+        })
+        .catch((e) => {
+          logProtocol.warn('sessionUpdate failed', { sessionId, error: e.message });
+        });
+      return;
+    }
+
+    if (item.type !== 'message') {
+      logProtocol.warn('Unexpected CLI message type', { sessionId, type: item.type });
+      return;
+    }
+
+    const msg = item.msg;
+
+    // Capture thread ID from result message for session persistence
+    if (msg.type === 'result' && msg.session_id && !session.threadId) {
+      session.threadId = msg.session_id;
+      logSession.debug('Captured thread ID from CLI', { sessionId, threadId: msg.session_id });
+    }
+
+    // Handle plan updates from todo_write/todo_read
+    if (msg.type === 'assistant' && Array.isArray(msg.message?.content)) {
+      for (const chunk of msg.message.content) {
+        if (chunk.type === 'tool_use' && (chunk.name === 'todo_write' || chunk.name === 'todo_read')) {
+          this._handlePlanToolUse(sessionId, session, chunk);
+        }
+        if (this.clientCapabilities?.terminal && isBashToolUse(chunk)) {
+          await this._createTerminalForBash(sessionId, session, chunk);
+        }
+      }
+    }
+
+    // Handle terminal release on tool result
+    if (msg.type === 'user' && Array.isArray(msg.message?.content)) {
+      for (const chunk of msg.message.content) {
+        const toolResult = getToolResult(chunk);
+        if (toolResult && session.terminals.has(toolResult.toolUseId)) {
+          await this._releaseTerminal(session, toolResult.toolUseId);
+        }
+      }
+    }
+
+    const notifications = toAcpNotifications(
+      msg,
+      sessionId,
+      session.activeToolCalls,
+      this.clientCapabilities,
+      session.nestedTracker
+    );
+    for (const notif of notifications) {
+      session.chain = session.chain
+        .then(() => this.client.sessionUpdate(notif))
+        .catch((e) => {
+          logProtocol.warn('sessionUpdate failed', { sessionId, error: e.message });
+        });
+    }
+  }
+
+  /**
+   * Process an SDK backend message.
+   */
+  async _processSdkMessage(sessionId, session, msg) {
+    // Capture thread ID from SDK messages for session persistence
+    if (msg.session_id && !session.threadId) {
+      session.threadId = msg.session_id;
+      logSession.debug('Captured thread ID from SDK', { sessionId, threadId: msg.session_id });
+    }
+
+    // Extract terminal and plan actions using shared helper
+    const actions = extractSdkTerminalAndPlanActions(msg);
+
+    // Handle plan updates
+    for (const plan of actions.plans) {
+      this._handlePlanToolUse(sessionId, session, {
+        id: plan.toolUseId,
+        name: plan.type === 'write' ? 'todo_write' : 'todo_read',
+        input: plan.todos ? { todos: plan.todos } : {},
+      });
+    }
+
+    // Handle terminal creation for Bash tools
+    if (this.clientCapabilities?.terminal) {
+      for (const term of actions.terminals) {
+        await this._createTerminalForBash(sessionId, session, {
+          id: term.toolUseId,
+          input: { cmd: term.cmd, cwd: term.cwd },
+        });
+      }
+    }
+
+    // Handle terminal release on tool results
+    for (const release of actions.terminalReleases) {
+      if (session.terminals.has(release.toolUseId)) {
+        await this._releaseTerminal(session, release.toolUseId);
+      }
+    }
+
+    const notifications = sdkMessageToAcpNotifications(
+      msg,
+      sessionId,
+      session.activeToolCalls,
+      this.clientCapabilities,
+      session.nestedTracker
+    );
+    for (const notif of notifications) {
+      session.chain = session.chain
+        .then(() => this.client.sessionUpdate(notif))
+        .catch((e) => {
+          logProtocol.warn('sessionUpdate failed', { sessionId, error: e.message });
+        });
+    }
+  }
+
   async _createAmpSettingsFileForMode(cwd, modeId) {
-    const overrides = getAmpSettingsOverridesForMode(modeId);
-
-    // Preserve existing global + workspace settings while enforcing the selected mode.
-    const baseSettings = {
-      ...(await readJsonFile(getDefaultAmpSettingsPath())),
-      ...(await readJsonFile(path.join(cwd, '.amp', 'settings.json'))),
-    };
-
-    const merged = { ...baseSettings };
-    merged['amp.dangerouslyAllowAll'] = overrides.dangerouslyAllowAll;
-
-    if (Array.isArray(overrides.prependPermissions) && overrides.prependPermissions.length > 0) {
-      const existing = Array.isArray(merged['amp.permissions']) ? merged['amp.permissions'] : [];
-      merged['amp.permissions'] = [...overrides.prependPermissions, ...existing];
-    }
-
-    if (Array.isArray(overrides.disableTools) && overrides.disableTools.length > 0) {
-      const existing = Array.isArray(merged['amp.tools.disable']) ? merged['amp.tools.disable'] : [];
-      merged['amp.tools.disable'] = uniqStrings([...existing, ...overrides.disableTools]);
-    }
+    const merged = await loadMergedAmpSettings(cwd, modeId, logSpawn);
 
     const tmpPath = path.join(os.tmpdir(), `amp-acp-settings-${modeId}-${randomUUID()}.json`);
     try {
@@ -575,8 +710,6 @@ export class AmpAcpAgent {
           }
           break;
         case 'image':
-          // Images are handled separately via _saveImagesToTempFiles
-          // and included as file paths that Amp's look_at tool can read
           break;
         default:
           break;
@@ -585,11 +718,6 @@ export class AmpAcpAgent {
     return textInput;
   }
 
-  /**
-   * Save image chunks to temp files and return file paths
-   * @param {Array} prompt - ACP prompt chunks
-   * @returns {Promise<{paths: string[], cleanup: () => Promise<void>}>}
-   */
   async _saveImagesToTempFiles(prompt) {
     const imagePaths = [];
     const failedImages = [];
@@ -597,7 +725,6 @@ export class AmpAcpAgent {
 
     for (let i = 0; i < imageChunks.length; i++) {
       const chunk = imageChunks[i];
-      // Sanitize extension: extract after '/', keep only alphanumeric chars
       const rawExt = chunk.mediaType?.split('/')[1] || 'png';
       const ext = rawExt.replace(/[^a-z0-9]/gi, '') || 'png';
       const filename = `amp-acp-image-${randomUUID()}.${ext}`;
@@ -635,7 +762,6 @@ export class AmpAcpAgent {
       }));
       this._emitPlanUpdate(sessionId, session);
     } else if (chunk.name === 'todo_read') {
-      // Emit current plan state when Amp reads todos
       this._emitPlanUpdate(sessionId, session);
     }
   }
@@ -649,13 +775,11 @@ export class AmpAcpAgent {
         args: ['-c', chunk.input.cmd],
         cwd: chunk.input.cwd || process.cwd(),
       });
-      // Track terminal with lease metadata for TTL-based cleanup
       session.terminals.set(chunk.id, {
         terminal,
         createdAt: Date.now(),
-        leaseMs: 5 * 60 * 1000, // 5 min lease
+        leaseMs: 5 * 60 * 1000,
       });
-      // Emit tool_call_update with terminal content
       await this.client.sessionUpdate({
         sessionId,
         update: {
@@ -708,11 +832,17 @@ export class AmpAcpAgent {
 
   async cancel(params) {
     const s = this.sessions.get(params.sessionId);
-    if (!s) return { outcome: 'cancelled' }; // Session not found, already cancelled
-    if (s.active && s.proc) {
+    if (!s) return { outcome: 'cancelled' };
+    if (s.active) {
       s.cancelled = true;
       logSession.debug('Cancelling session', { sessionId: params.sessionId });
-      safeKill(s.proc, 'SIGINT');
+      if (s.proc) {
+        // CLI backend: kill the process
+        safeKill(s.proc, 'SIGINT');
+      } else if (s.abortController) {
+        // SDK backend: abort via signal
+        s.abortController.abort();
+      }
     }
     return { outcome: 'cancelled' };
   }
@@ -728,7 +858,6 @@ export class AmpAcpAgent {
     const s = this.sessions.get(sessionId);
     if (!s) return;
 
-    // Emit failed status for ALL non-terminal tool calls (not just in_progress)
     for (const [toolCallId, toolCall] of s.activeToolCalls) {
       const status = toolCall.lastStatus;
       if (status !== 'completed' && status !== 'failed') {
@@ -739,7 +868,6 @@ export class AmpAcpAgent {
           status,
           startTime: toolCall.startTime,
         });
-        // Emit failed status for orphaned calls (fire-and-forget)
         this.client
           .sessionUpdate({
             sessionId,
@@ -756,10 +884,7 @@ export class AmpAcpAgent {
       }
     }
 
-    // Release all terminals with guaranteed cleanup
     this._releaseAllTerminals(s);
-
-    // Clear all state trackers
     s.nestedTracker.clear();
     s.activeToolCalls.clear();
     this.sessions.delete(sessionId);
@@ -767,93 +892,8 @@ export class AmpAcpAgent {
   }
 }
 
-function getDefaultAmpSettingsPath() {
-  // Environment variable takes precedence, mirroring `amp --settings-file` default resolution.
-  if (process.env.AMP_SETTINGS_FILE) return process.env.AMP_SETTINGS_FILE;
-  const home = os.homedir?.() || process.env.HOME;
-  if (!home) return null;
-  return path.join(home, '.config', 'amp', 'settings.json');
-}
-
-async function readJsonFile(filePath) {
-  if (!filePath) return {};
-  try {
-    const raw = await fs.readFile(filePath, 'utf8');
-    if (!raw.trim()) return {};
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch (e) {
-    if (e?.code === 'ENOENT') {
-      // File not found is expected - return empty settings
-      return {};
-    } else if (e instanceof SyntaxError) {
-      // JSON parsing error - corrupted file
-      logSpawn.error('Invalid JSON in Amp settings file', { filePath, error: e.message });
-      return {};
-    } else {
-      // Other I/O errors (permission denied, file locked, etc.)
-      logSpawn.error('Failed to read Amp settings file', { filePath, error: e.message, code: e.code });
-      return {};
-    }
-  }
-}
-
-function uniqStrings(values) {
-  const out = [];
-  const seen = new Set();
-  for (const v of values) {
-    if (typeof v !== 'string') continue;
-    if (seen.has(v)) continue;
-    seen.add(v);
-    out.push(v);
-  }
-  return out;
-}
-
-function safeClose(rl) {
-  try {
-    rl?.close();
-  } catch {}
-}
-
 function safeKill(proc, signal) {
   try {
     proc?.kill(signal);
   } catch {}
-}
-
-/**
- * Two-phase graceful kill: SIGTERM first, then SIGKILL after timeout
- * @param {ChildProcess} proc - The process to kill
- * @param {number} graceMs - Grace period before SIGKILL (default: 5000ms)
- * @returns {Promise<'exited'|'killed'>}
- */
-async function gracefulKill(proc, graceMs = 5000) {
-  if (!proc || proc.exitCode !== null) {
-    return 'exited';
-  }
-
-  return new Promise((resolve) => {
-    const cleanup = () => {
-      clearTimeout(timer);
-      proc.removeListener('exit', onExit);
-    };
-
-    const onExit = () => {
-      cleanup();
-      resolve('exited');
-    };
-
-    proc.once('exit', onExit);
-
-    // First try SIGTERM (graceful)
-    safeKill(proc, 'SIGTERM');
-
-    // If still running after grace period, force kill
-    const timer = setTimeout(() => {
-      proc.removeListener('exit', onExit);
-      safeKill(proc, 'SIGKILL');
-      resolve('killed');
-    }, graceMs);
-  });
 }

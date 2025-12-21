@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { toAcpNotifications, isBashToolUse, getToolResult, NestedToolTracker } from '../src/to-acp.js';
-import { config } from '../src/config.js';
+import { config, isFileEditTool } from '../src/config.js';
 
 describe('toAcpNotifications', () => {
   const sessionId = 'test-session';
@@ -685,5 +685,219 @@ describe('NestedToolTracker', () => {
     expect(lines[4]).toContain('cmd7');
     expect(lines[5]).toContain('cmd8');
     expect(text).toContain('8 failed');
+  });
+});
+
+describe('isFileEditTool', () => {
+  it('returns true for edit_file', () => {
+    expect(isFileEditTool('edit_file')).toBe(true);
+  });
+
+  it('returns true for create_file', () => {
+    expect(isFileEditTool('create_file')).toBe(true);
+  });
+
+  it('returns false for other tools', () => {
+    expect(isFileEditTool('Read')).toBe(false);
+    expect(isFileEditTool('Bash')).toBe(false);
+    expect(isFileEditTool('Grep')).toBe(false);
+    expect(isFileEditTool(undefined)).toBe(false);
+    expect(isFileEditTool(null)).toBe(false);
+  });
+});
+
+describe('ACP diff content type', () => {
+  const sessionId = 'test-session';
+
+  it('converts edit_file tool result to diff content with oldText and newText', () => {
+    const activeToolCalls = new Map();
+
+    // First, emit tool_use for edit_file
+    const toolUseMsg = {
+      type: 'assistant',
+      message: {
+        content: [
+          {
+            type: 'tool_use',
+            id: 'edit-123',
+            name: 'edit_file',
+            input: {
+              path: '/home/user/project/src/main.js',
+              old_str: 'const x = 1;',
+              new_str: 'const x = 2;',
+            },
+          },
+        ],
+      },
+    };
+
+    toAcpNotifications(toolUseMsg, sessionId, activeToolCalls);
+    expect(activeToolCalls.has('edit-123')).toBe(true);
+    expect(activeToolCalls.get('edit-123').input.path).toBe('/home/user/project/src/main.js');
+
+    // Then emit tool_result
+    const toolResultMsg = {
+      type: 'user',
+      message: {
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'edit-123',
+            is_error: false,
+            content: 'File edited successfully',
+          },
+        ],
+      },
+    };
+
+    const result = toAcpNotifications(toolResultMsg, sessionId, activeToolCalls);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].update.sessionUpdate).toBe('tool_call_update');
+    expect(result[0].update.status).toBe('completed');
+    expect(result[0].update.content).toHaveLength(1);
+    expect(result[0].update.content[0].type).toBe('content');
+    expect(result[0].update.content[0].content.type).toBe('diff');
+    expect(result[0].update.content[0].content.path).toBe('/home/user/project/src/main.js');
+    expect(result[0].update.content[0].content.oldText).toBe('const x = 1;');
+    expect(result[0].update.content[0].content.newText).toBe('const x = 2;');
+  });
+
+  it('converts create_file tool result to diff content with newText only', () => {
+    const activeToolCalls = new Map();
+
+    // First, emit tool_use for create_file
+    const toolUseMsg = {
+      type: 'assistant',
+      message: {
+        content: [
+          {
+            type: 'tool_use',
+            id: 'create-456',
+            name: 'create_file',
+            input: {
+              path: '/home/user/project/new-file.ts',
+              content: 'export const hello = "world";',
+            },
+          },
+        ],
+      },
+    };
+
+    toAcpNotifications(toolUseMsg, sessionId, activeToolCalls);
+
+    // Then emit tool_result
+    const toolResultMsg = {
+      type: 'user',
+      message: {
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'create-456',
+            is_error: false,
+            content: 'File created successfully',
+          },
+        ],
+      },
+    };
+
+    const result = toAcpNotifications(toolResultMsg, sessionId, activeToolCalls);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].update.content[0].content.type).toBe('diff');
+    expect(result[0].update.content[0].content.path).toBe('/home/user/project/new-file.ts');
+    expect(result[0].update.content[0].content.newText).toBe('export const hello = "world";');
+    // create_file should NOT have oldText
+    expect(result[0].update.content[0].content.oldText).toBeUndefined();
+  });
+
+  it('falls back to regular text content for non-file-edit tools', () => {
+    const activeToolCalls = new Map();
+
+    // Tool use for Read (not a file edit tool)
+    const toolUseMsg = {
+      type: 'assistant',
+      message: {
+        content: [
+          {
+            type: 'tool_use',
+            id: 'read-789',
+            name: 'Read',
+            input: { path: '/some/file.txt' },
+          },
+        ],
+      },
+    };
+
+    toAcpNotifications(toolUseMsg, sessionId, activeToolCalls);
+
+    // Tool result
+    const toolResultMsg = {
+      type: 'user',
+      message: {
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'read-789',
+            is_error: false,
+            content: 'file contents here',
+          },
+        ],
+      },
+    };
+
+    const result = toAcpNotifications(toolResultMsg, sessionId, activeToolCalls);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].update.content[0].content.type).toBe('text');
+    expect(result[0].update.content[0].content.text).toBe('file contents here');
+  });
+
+  it('falls back to regular text content on error even for file edit tools', () => {
+    const activeToolCalls = new Map();
+
+    // Tool use for edit_file
+    const toolUseMsg = {
+      type: 'assistant',
+      message: {
+        content: [
+          {
+            type: 'tool_use',
+            id: 'edit-fail',
+            name: 'edit_file',
+            input: {
+              path: '/some/file.js',
+              old_str: 'foo',
+              new_str: 'bar',
+            },
+          },
+        ],
+      },
+    };
+
+    toAcpNotifications(toolUseMsg, sessionId, activeToolCalls);
+
+    // Error tool result
+    const toolResultMsg = {
+      type: 'user',
+      message: {
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'edit-fail',
+            is_error: true,
+            content: 'Error: old_str not found in file',
+          },
+        ],
+      },
+    };
+
+    const result = toAcpNotifications(toolResultMsg, sessionId, activeToolCalls);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].update.status).toBe('failed');
+    // On error, should fall back to text content (with code wrap)
+    expect(result[0].update.content[0].content.type).toBe('text');
+    expect(result[0].update.content[0].content.text).toContain('Error: old_str not found');
   });
 });

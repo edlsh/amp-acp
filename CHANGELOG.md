@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Persistent memory for sessions**: Amp thread IDs are now captured from `session_id` in CLI result messages and SDK messages, enabling automatic conversation continuation
+- Thread continuation via SDK `continue` option for subsequent prompts within a session
+- Multi-message SDK flow via `executeMultiMessage()` method in SDK backend
+- `_getCreateUserMessage()` lazy loader for amp-sdk's `createUserMessage` helper
+- ACP Diff Content Type support for file edit tools (`edit_file`, `create_file`)
+- `isFileEditTool()` helper in config.js for detecting file modification tools
+- Diff content format: `{ type: "diff", path, oldText?, newText }` for Zed accept/reject UI
+- ACP Session Load (Thread Continuation): `loadSession: true` capability enables resuming Amp threads
+- `loadSession()` method to load existing threads by ID (T-{uuid} format)
+- Thread history fetching via `amp threads markdown T-xxx`
+- Thread continuation via `amp threads continue T-xxx --execute --stream-json`
+- `getThreadHistory()` and `continueThread()` exports in CLI backend
+- SDK backend stubs for thread operations (not yet supported by SDK)
+- SDK backend support via `@sourcegraph/amp-sdk` (opt-in via `AMP_ACP_BACKEND=sdk`)
+- Backend abstraction layer (`CliAmpBackend`, `SdkAmpBackend`) with factory pattern
+- `buildAmpOptions()` helper for SDK configuration with mode support
+- SDK adapter (`sdk-adapter.js`) for converting SDK messages to CLI-compatible format
+- SDK adapter helpers for Terminal/Plan feature parity: `isSdkPlanToolUse()`, `extractPlanFromSdkToolUse()`, `extractSdkTerminalAndPlanActions()`
+- Comprehensive test coverage for backends and SDK adapter
+
+### Changed
+
+- Refactored prompt execution to use pluggable backend drivers
+- CLI backend now uses circuit breaker pattern for spawn protection
+- `loadSession` capability now conditional: only advertised when CLI backend is active (SDK backend doesn't support thread operations yet)
+- Pinned `@sourcegraph/amp-sdk` to `^0.1.0` for deterministic builds
+
+### Fixed
+
+- Circuit breaker check now happens before allocating temp files and abort listeners, preventing resource leaks on early return
+- SDK backend regression: removed invalid `prependPermissions` and `toolbox.disableTools` from AmpOptions (SDK only accepts `cwd`, `dangerouslyAllowAll`, `toolbox` as path string)
+
+### Known Limitations
+
+- SDK backend does not support per-mode permission/tool overrides (acceptEdits, plan modes) - SDK reads permissions from user's settings file directly. Only `dangerouslyAllowAll` (bypassPermissions mode) is effective via SDK.
+
 ## [0.2.9] - 2025-12-21
 
 ### Fixed

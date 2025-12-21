@@ -1,7 +1,14 @@
 // Convert Amp stream JSON events to ACP sessionUpdate notifications.
 // Schema reference: https://ampcode.com/manual/appendix#stream-json-output
 
-import { config, getToolKind, getToolTitle, getToolLocations, getInlineToolDescription } from './config.js';
+import {
+  config,
+  getToolKind,
+  getToolTitle,
+  getToolLocations,
+  getInlineToolDescription,
+  isFileEditTool,
+} from './config.js';
 import { createLogger } from './logger.js';
 
 const logProtocol = createLogger('acp:protocol');
@@ -286,14 +293,22 @@ export function toAcpNotifications(
             }
 
             // Normal (non-child) tool result
+            const toolCall = activeToolCalls.get(acpToolCallId);
             activeToolCalls.delete(acpToolCallId);
+
+            // Generate diff content for file edit tools, regular content otherwise
+            const content =
+              !isError && toolCall && isFileEditTool(toolCall.name)
+                ? toAcpDiffContent(toolCall.name, toolCall.input, chunk.content)
+                : toAcpContentArray(chunk.content, isError);
+
             output.push({
               sessionId,
               update: {
                 toolCallId: acpToolCallId,
                 sessionUpdate: 'tool_call_update',
                 status,
-                content: toAcpContentArray(chunk.content, isError),
+                content,
               },
             });
           }
@@ -355,6 +370,7 @@ export function toAcpNotifications(
             activeToolCalls.set(acpToolCallId, {
               ampId, // Store original Amp ID for correlation
               name: chunk.name,
+              input: chunk.input, // Store input for diff content generation
               startTime: Date.now(),
               lastStatus: 'in_progress',
             });
@@ -426,6 +442,54 @@ function toAcpContentArray(content, isError = false) {
 
 function wrapCode(t) {
   return '```\n' + t + '\n```';
+}
+
+/**
+ * Convert file edit tool result to ACP diff content format.
+ * Extracts path, oldText, and newText from stored tool input.
+ *
+ * @param {string} toolName - 'edit_file' or 'create_file'
+ * @param {object} input - Original tool input (path, old_str/new_str or content)
+ * @param {string|Array} resultContent - Tool result content (for fallback)
+ * @returns {Array} - ACP content array with diff type
+ */
+function toAcpDiffContent(toolName, input, resultContent) {
+  if (!input?.path) {
+    // Missing path - fall back to regular content
+    return toAcpContentArray(resultContent, false);
+  }
+
+  if (toolName === 'create_file') {
+    // create_file: newText only (file didn't exist)
+    return [
+      {
+        type: 'content',
+        content: {
+          type: 'diff',
+          path: input.path,
+          newText: input.content || '',
+        },
+      },
+    ];
+  }
+
+  if (toolName === 'edit_file') {
+    // edit_file: old_str → new_str as partial diff
+    return [
+      {
+        type: 'content',
+        content: {
+          type: 'diff',
+          path: input.path,
+          oldText: input.old_str || '',
+          newText: input.new_str || '',
+        },
+      },
+    ];
+  }
+
+  // Unknown tool - fall back to regular content
+  return toAcpContentArray(resultContent, false);
 }
 
 /**
