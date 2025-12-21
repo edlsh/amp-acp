@@ -244,38 +244,112 @@ describe('AmpAcpAgent', () => {
       agent = new AmpAcpAgent(mockClient, Promise.resolve(null));
     });
 
-    it('converts ACP image chunks to Amp JSON format', () => {
+    it('skips image chunks in _buildTextInput (handled separately via temp files)', () => {
+      // Valid 1x1 transparent PNG for test data integrity
+      const validPngBase64 =
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
       const prompt = [
         { type: 'text', text: 'Describe this image:' },
-        { type: 'image', mediaType: 'image/png', data: 'iVBORw0KGgo=' },
+        { type: 'image', mediaType: 'image/png', data: validPngBase64 },
       ];
 
       const result = agent._buildTextInput(prompt);
 
       expect(result).toContain('Describe this image:');
-      expect(result).toContain('"type":"image"');
-      expect(result).toContain('"media_type":"image/png"');
-      expect(result).toContain('"data":"iVBORw0KGgo="');
+      expect(result).not.toContain(validPngBase64);
     });
 
-    it('handles image chunks without data gracefully', () => {
+    it('saves images to temp files and returns paths', async () => {
+      const prompt = [
+        { type: 'text', text: 'test' },
+        {
+          type: 'image',
+          mediaType: 'image/png',
+          data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+        },
+      ];
+
+      const { paths, cleanup } = await agent._saveImagesToTempFiles(prompt);
+
+      expect(paths).toHaveLength(1);
+      expect(paths[0]).toContain('amp-acp-image-');
+      expect(paths[0]).toContain('.png');
+
+      await cleanup();
+    });
+
+    it('handles image chunks without data gracefully', async () => {
       const prompt = [
         { type: 'text', text: 'test' },
         { type: 'image', mediaType: 'image/png' }, // no data
       ];
 
-      const result = agent._buildTextInput(prompt);
+      const { paths, cleanup } = await agent._saveImagesToTempFiles(prompt);
 
-      expect(result).toBe('test');
-      expect(result).not.toContain('"type":"image"');
+      expect(paths).toHaveLength(0);
+      await cleanup();
     });
 
-    it('defaults mediaType to image/png when not provided', () => {
-      const prompt = [{ type: 'image', data: 'base64data' }];
+    it('defaults extension to png when mediaType not provided', async () => {
+      const prompt = [
+        {
+          type: 'image',
+          data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+        },
+      ];
 
-      const result = agent._buildTextInput(prompt);
+      const { paths, cleanup } = await agent._saveImagesToTempFiles(prompt);
 
-      expect(result).toContain('"media_type":"image/png"');
+      expect(paths[0]).toContain('.png');
+      await cleanup();
+    });
+
+    it('sanitizes malicious mediaType to prevent path traversal', async () => {
+      const prompt = [
+        {
+          type: 'image',
+          mediaType: 'image/../../etc/passwd',
+          data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+        },
+      ];
+
+      const { paths, cleanup } = await agent._saveImagesToTempFiles(prompt);
+
+      // ".." sanitizes to empty string, falls back to png
+      expect(paths[0]).toMatch(/\.png$/);
+      expect(paths[0]).not.toContain('..');
+      await cleanup();
+    });
+
+    it('strips special chars from extension', async () => {
+      const prompt = [
+        {
+          type: 'image',
+          mediaType: 'image/svg+xml',
+          data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+        },
+      ];
+
+      const { paths, cleanup } = await agent._saveImagesToTempFiles(prompt);
+
+      // "svg+xml" sanitizes to "svgxml"
+      expect(paths[0]).toMatch(/\.svgxml$/);
+      await cleanup();
+    });
+
+    it('returns empty failedImages array on success', async () => {
+      const prompt = [
+        {
+          type: 'image',
+          mediaType: 'image/png',
+          data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+        },
+      ];
+
+      const { failedImages, cleanup } = await agent._saveImagesToTempFiles(prompt);
+
+      expect(failedImages).toEqual([]);
+      await cleanup();
     });
   });
 });

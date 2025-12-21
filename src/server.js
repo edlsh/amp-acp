@@ -211,8 +211,9 @@ export class AmpAcpAgent {
     let hadOutput = false;
     let spawnError = null;
 
-    // Check for slash command
+    // Check for slash command BEFORE saving images to avoid temp file leaks on early returns
     let textInput = this._buildTextInput(params.prompt);
+
     const commandMatch = textInput.trim().match(/^\/(\w+)(?:\s+(.*))?$/s);
     if (commandMatch) {
       const [, cmdName, cmdArg] = commandMatch;
@@ -274,6 +275,29 @@ export class AmpAcpAgent {
           logProtocol.warn('Failed to send spawn failure message', { sessionId: params.sessionId, error: e.message });
         });
       return { stopReason: 'refusal' };
+    }
+
+    // Save images to temp files AFTER all early return paths to prevent resource leaks
+    const {
+      paths: imagePaths,
+      cleanup: cleanupImages,
+      failedImages,
+    } = await this._saveImagesToTempFiles(params.prompt);
+
+    // Append image file paths to text input
+    if (imagePaths.length > 0) {
+      textInput += '\n\n[Attached images:]\n';
+      for (const imgPath of imagePaths) {
+        textInput += `${imgPath}\n`;
+      }
+    }
+
+    // Inform agent about failed image attachments
+    if (failedImages.length > 0) {
+      textInput += '\n\n[Warning: Some image attachments failed to load:]\n';
+      for (const f of failedImages) {
+        textInput += `- Image ${f.index}: ${f.error}\n`;
+      }
     }
 
     const proc = spawn(config.ampExecutable, finalSpawnArgs, {
@@ -497,6 +521,9 @@ export class AmpAcpAgent {
           logSpawn.warn('Failed to cleanup temp Amp settings file', { ampSettingsFile, error: e.message });
         }
       }
+
+      // Cleanup temp image files
+      await cleanupImages();
     }
   }
 
@@ -548,23 +575,55 @@ export class AmpAcpAgent {
           }
           break;
         case 'image':
-          if (chunk.data) {
-            const ampImage = {
-              type: 'image',
-              source: {
-                type: 'base64',
-                media_type: chunk.mediaType || 'image/png',
-                data: chunk.data,
-              },
-            };
-            textInput += JSON.stringify(ampImage) + '\n';
-          }
+          // Images are handled separately via _saveImagesToTempFiles
+          // and included as file paths that Amp's look_at tool can read
           break;
         default:
           break;
       }
     }
     return textInput;
+  }
+
+  /**
+   * Save image chunks to temp files and return file paths
+   * @param {Array} prompt - ACP prompt chunks
+   * @returns {Promise<{paths: string[], cleanup: () => Promise<void>}>}
+   */
+  async _saveImagesToTempFiles(prompt) {
+    const imagePaths = [];
+    const failedImages = [];
+    const imageChunks = prompt.filter((chunk) => chunk.type === 'image' && chunk.data);
+
+    for (let i = 0; i < imageChunks.length; i++) {
+      const chunk = imageChunks[i];
+      // Sanitize extension: extract after '/', keep only alphanumeric chars
+      const rawExt = chunk.mediaType?.split('/')[1] || 'png';
+      const ext = rawExt.replace(/[^a-z0-9]/gi, '') || 'png';
+      const filename = `amp-acp-image-${randomUUID()}.${ext}`;
+      const filepath = path.join(os.tmpdir(), filename);
+
+      try {
+        const buffer = Buffer.from(chunk.data, 'base64');
+        await fs.writeFile(filepath, buffer);
+        imagePaths.push(filepath);
+      } catch (e) {
+        logSpawn.warn('Failed to save image to temp file', { filepath, error: e.message });
+        failedImages.push({ index: i + 1, error: e.message });
+      }
+    }
+
+    const cleanup = async () => {
+      for (const p of imagePaths) {
+        try {
+          await fs.unlink(p);
+        } catch (e) {
+          logSpawn.warn('Failed to cleanup temp image', { path: p, error: e.message });
+        }
+      }
+    };
+
+    return { paths: imagePaths, cleanup, failedImages };
   }
 
   _handlePlanToolUse(sessionId, session, chunk) {

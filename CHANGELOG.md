@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.9] - 2025-12-21
+
+### Fixed
+
+- Security: Path traversal vulnerability in image temp file handling - malicious mediaType values are now sanitized to alphanumeric characters only
+- Resource leak: Temp image files are now created after early return paths (slash commands, circuit breaker) to ensure cleanup
+- Failed image attachments now inform the agent via warning text instead of silently dropping context
+
 ## [0.2.8] - 2025-12-21
 
 ### Added
@@ -128,7 +136,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Connection lifecycle management with abort signal
 - Timeout handling for long-running prompts
 
-[Unreleased]: https://github.com/edlsh/amp-acp/compare/v0.2.8...HEAD
+[Unreleased]: https://github.com/edlsh/amp-acp/compare/v0.2.9...HEAD
+[0.2.9]: https://github.com/edlsh/amp-acp/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/edlsh/amp-acp/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/edlsh/amp-acp/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/edlsh/amp-acp/compare/v0.2.5...v0.2.6
