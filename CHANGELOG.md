@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2025-12-21
+
 ### Added
 
 - **Persistent memory for sessions**: Amp thread IDs are now captured from `session_id` in CLI result messages and SDK messages, enabling automatic conversation continuation
@@ -174,7 +176,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Connection lifecycle management with abort signal
 - Timeout handling for long-running prompts
 
-[Unreleased]: https://github.com/edlsh/amp-acp/compare/v0.2.9...HEAD
+[Unreleased]: https://github.com/edlsh/amp-acp/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/edlsh/amp-acp/compare/v0.2.9...v0.3.0
 [0.2.9]: https://github.com/edlsh/amp-acp/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/edlsh/amp-acp/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/edlsh/amp-acp/compare/v0.2.6...v0.2.7
