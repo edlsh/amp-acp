@@ -111,14 +111,16 @@ function adaptUserContent(content) {
 }
 
 /**
- * Direct conversion from SDK message to ACP notifications.
- * More efficient than adapting then converting, and allows SDK-specific handling.
+ * Convert SDK message directly to ACP notifications.
+ * Provides consistent handling with CLI messages while working directly
+ * with SDK message format.
  *
  * @param {object} sdkMessage - Message from @sourcegraph/amp-sdk
  * @param {string} sessionId - ACP session ID
  * @param {Map} activeToolCalls - Map tracking active tool calls
  * @param {object} clientCapabilities - ACP client capabilities (unused currently)
  * @param {NestedToolTracker|null} nestedTracker - Tracker for nested tool calls
+ * @param {Map} ampToAcpToolIds - Persistent SDK→ACP ID mapping for tool result correlation
  * @returns {Array} - Array of ACP notification objects
  */
 export function sdkMessageToAcpNotifications(
@@ -126,7 +128,8 @@ export function sdkMessageToAcpNotifications(
   sessionId,
   activeToolCalls = new Map(),
   _clientCapabilities = {},
-  nestedTracker = null
+  nestedTracker = null,
+  ampToAcpToolIds = new Map()
 ) {
   if (!sdkMessage?.type) return [];
 
@@ -136,22 +139,45 @@ export function sdkMessageToAcpNotifications(
 
   /**
    * Generate a session-unique ACP tool call ID from an SDK tool_use_id.
-   * Uses crypto.randomUUID() for guaranteed uniqueness under high concurrency.
+   * Uses cryptographic UUID to prevent collisions under concurrency.
+   * Persists mapping in ampToAcpToolIds for correlation on tool_result.
    */
   const getUniqueToolCallId = (sdkId) => {
+    // If we've already mapped this SDK ID, reuse it (idempotent for replays)
+    const existing = ampToAcpToolIds.get(sdkId);
+    if (existing) return existing;
+
+    // Check if sdkId is already unique in activeToolCalls
     if (!activeToolCalls.has(sdkId)) {
+      ampToAcpToolIds.set(sdkId, sdkId);
       return sdkId;
     }
-    return `${sdkId}_${randomUUID().slice(0, 8)}`;
+
+    // Generate cryptographically unique ID to prevent collision
+    let acpId;
+    do {
+      acpId = `${sdkId}_${randomUUID().slice(0, 8)}`;
+    } while (activeToolCalls.has(acpId));
+
+    ampToAcpToolIds.set(sdkId, acpId);
+    return acpId;
   };
 
   /**
-   * Find the ACP tool call ID for a given SDK tool_use_id
+   * Find the ACP tool call ID for a given SDK tool_use_id.
+   * Uses ampToAcpToolIds for persistent mapping that survives activeToolCalls.delete().
    */
   const findAcpToolCallId = (sdkId) => {
+    // Check persistent mapping first (survives activeToolCalls cleanup)
+    const mapped = ampToAcpToolIds.get(sdkId);
+    if (mapped) return mapped;
+
+    // Direct match in activeToolCalls (legacy fallback)
     if (activeToolCalls.has(sdkId)) {
       return sdkId;
     }
+
+    // Search for mapped ID in activeToolCalls (defensive fallback)
     for (const [acpId, toolCall] of activeToolCalls) {
       if (toolCall.sdkId === sdkId) {
         return acpId;

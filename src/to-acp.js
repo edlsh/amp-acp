@@ -1,6 +1,7 @@
 // Convert Amp stream JSON events to ACP sessionUpdate notifications.
 // Schema reference: https://ampcode.com/manual/appendix#stream-json-output
 
+import { randomUUID } from 'node:crypto';
 import {
   config,
   getToolKind,
@@ -165,44 +166,63 @@ export function toAcpNotifications(
   sessionId,
   activeToolCalls = new Map(),
   _clientCapabilities = {},
-  nestedTracker = null
+  nestedTracker = null,
+  ampToAcpToolIds = new Map()
 ) {
   const output = [];
   const inlineMode = config.nestedToolMode === 'inline';
   const flatMode = config.nestedToolMode === 'flat';
 
   /**
-   * Generate a session-unique ACP tool call ID from an Amp tool_use_id
-   * If the ID already exists, generate a unique replacement and track the mapping
+   * Generate a session-unique ACP tool call ID from an Amp tool_use_id.
+   * Uses cryptographic UUID to prevent collisions under concurrency.
+   * Persists mapping in ampToAcpToolIds for correlation on tool_result.
    * @param {string} ampId - Original Amp tool_use_id
    * @returns {string} - Session-unique ACP tool call ID
    */
   const getUniqueToolCallId = (ampId) => {
+    // If we've already mapped this Amp ID, reuse it (idempotent for replays)
+    const existing = ampToAcpToolIds.get(ampId);
+    if (existing) return existing;
+
+    // Check if ampId is already unique in activeToolCalls
     if (!activeToolCalls.has(ampId)) {
-      return ampId; // ID is unique, use as-is
+      ampToAcpToolIds.set(ampId, ampId);
+      return ampId;
     }
-    // Generate unique replacement ID
-    const uniqueId = `${ampId}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+
+    // Generate cryptographically unique ID to prevent collision
+    let acpId;
+    do {
+      acpId = `${ampId}_${randomUUID().slice(0, 8)}`;
+    } while (activeToolCalls.has(acpId));
+
+    ampToAcpToolIds.set(ampId, acpId);
     logProtocol.warn('Generated unique toolCallId for duplicate', {
       originalId: ampId,
-      uniqueId,
+      uniqueId: acpId,
       sessionId,
     });
-    return uniqueId;
+    return acpId;
   };
 
   /**
-   * Find the ACP tool call ID for a given Amp tool_use_id
-   * Handles both direct matches and ampId->acpId mappings
+   * Find the ACP tool call ID for a given Amp tool_use_id.
+   * Uses ampToAcpToolIds for persistent mapping that survives activeToolCalls.delete().
    * @param {string} ampId - Original Amp tool_use_id from tool_result
    * @returns {string|null} - ACP tool call ID or null if not found
    */
   const findAcpToolCallId = (ampId) => {
-    // Direct match (most common case - ID wasn't remapped)
+    // Check persistent mapping first (survives activeToolCalls cleanup)
+    const mapped = ampToAcpToolIds.get(ampId);
+    if (mapped) return mapped;
+
+    // Direct match in activeToolCalls (legacy fallback)
     if (activeToolCalls.has(ampId)) {
       return ampId;
     }
-    // Search for mapped ID
+
+    // Search for mapped ID in activeToolCalls (defensive fallback)
     for (const [acpId, toolCall] of activeToolCalls) {
       if (toolCall.ampId === ampId) {
         return acpId;
@@ -212,6 +232,7 @@ export function toAcpNotifications(
   };
 
   // Track tool call state transitions for validation
+  // Allow repeated terminal statuses for idempotent duplicate handling
   const validateStatusTransition = (toolCallId, newStatus) => {
     const existingCall = activeToolCalls.get(toolCallId);
     if (!existingCall) return true; // New tool call
@@ -219,8 +240,8 @@ export function toAcpNotifications(
     const currentStatus = existingCall.lastStatus;
     const validTransitions = {
       in_progress: ['completed', 'failed'],
-      completed: [], // Terminal state
-      failed: [], // Terminal state
+      completed: ['completed'], // Allow repeated for idempotent duplicates
+      failed: ['failed'], // Allow repeated for idempotent duplicates
     };
 
     if (!validTransitions[currentStatus]?.includes(newStatus)) {

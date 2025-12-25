@@ -11,8 +11,8 @@ const logStderr = createLogger('amp:stderr');
 // Global spawn circuit breaker - protects against repeated spawn failures
 const spawnBreaker = new CircuitBreaker({
   name: 'amp-spawn',
-  failureThreshold: 5,
-  resetTimeMs: 30000,
+  failureThreshold: config.circuitBreakerThreshold,
+  resetTimeMs: config.circuitBreakerResetMs,
 });
 
 /**
@@ -175,7 +175,7 @@ export class CliAmpBackend {
           while (messageQueue.length > 0) {
             yield messageQueue.shift();
           }
-          await gracefulKill(proc, 2000);
+          await gracefulKill(proc, config.cancelGraceMs);
           safeClose(rlOut);
           safeClose(rlErr);
           return {
@@ -459,7 +459,7 @@ export async function* continueThread(session, threadId, textInput, options, abo
         while (messageQueue.length > 0) {
           yield messageQueue.shift();
         }
-        await gracefulKill(proc, 2000);
+        await gracefulKill(proc, config.cancelGraceMs);
         safeClose(rlOut);
         safeClose(rlErr);
         return {

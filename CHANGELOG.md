@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Session Resume**: `resumeSession()` for lightweight reattachment to in-memory sessions without replaying history
+- **Session Fork**: `forkSession()` to create independent sessions sharing the same thread context
+- **Session List**: `listSessions()` with pagination, sorting by last activity, and cwd filtering
+- Session capabilities advertised in `initialize()`: `resume`, `fork`, `list`
+- `lastActivityAt` tracking on session state for activity-based sorting
+- `_createSessionState()` helper for consistent session initialization across newSession/loadSession/forkSession
+- `_emitNotifications()` helper for unified notification queueing in CLI and SDK message processing
+
+### Changed
+
+- **Configurable timeouts**: All hardcoded timeouts now configurable via environment variables:
+  - `AMP_ACP_STALE_TOOL_TIMEOUT_MS` (default: 30 min) - stale tool call cleanup threshold
+  - `AMP_ACP_TERMINAL_LEASE_MS` (default: 5 min) - terminal lease duration
+  - `AMP_ACP_CANCEL_GRACE_MS` (default: 2 sec) - process kill grace period
+  - `AMP_ACP_CIRCUIT_BREAKER_THRESHOLD` (default: 5) - spawn failure threshold
+  - `AMP_ACP_CIRCUIT_BREAKER_RESET_MS` (default: 30 sec) - circuit breaker reset time
+- Refactored `prompt()` method: extracted `_processSlashCommands()` and `_buildFinalInput()` helpers
+- Refactored session state initialization to use shared `_createSessionState()` helper
+
+### Fixed
+
+- **Tool result race condition**: Added `ampToAcpToolIds` persistent mapping to correlate tool results after `activeToolCalls.delete()`
+- **Tool call ID collision**: Replaced timestamp-based IDs with `crypto.randomUUID()` for collision-proof uniqueness
+- **Promise chain error swallowing**: New `_queueSessionUpdate()` helper properly propagates critical errors and marks sessions as FAILED
+- Status transition validation now allows repeated terminal statuses for idempotent duplicate handling
+
 ## [0.3.0] - 2025-12-21
 
 ### Added

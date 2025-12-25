@@ -352,4 +352,141 @@ describe('AmpAcpAgent', () => {
       await cleanup();
     });
   });
+
+  describe('resumeSession', () => {
+    let agent;
+    let mockClient;
+
+    beforeEach(() => {
+      mockClient = {
+        sessionUpdate: vi.fn().mockResolvedValue({}),
+      };
+      agent = new AmpAcpAgent(mockClient, Promise.resolve(null));
+    });
+
+    it('resumes existing session and updates lastActivityAt', async () => {
+      vi.useFakeTimers();
+      const { sessionId } = await agent.newSession({});
+      const session = agent.sessions.get(sessionId);
+      const initialActivity = session.lastActivityAt;
+
+      // Advance time
+      vi.advanceTimersByTime(1000);
+
+      const result = await agent.resumeSession({ sessionId });
+
+      expect(result.sessionId).toBe(sessionId);
+      expect(session.lastActivityAt).toBeGreaterThan(initialActivity);
+      vi.useRealTimers();
+    });
+
+    it('throws error for non-existent session', async () => {
+      await expect(agent.resumeSession({ sessionId: 'non-existent' })).rejects.toThrow('Session not found');
+    });
+
+    it('throws error for failed session', async () => {
+      vi.useFakeTimers();
+      const { sessionId } = await agent.newSession({});
+      const session = agent.sessions.get(sessionId);
+      session.state = 'failed';
+
+      await expect(agent.resumeSession({ sessionId })).rejects.toThrow('failed state');
+      vi.useRealTimers();
+    });
+  });
+
+  describe('forkSession', () => {
+    let agent;
+    let mockClient;
+
+    beforeEach(() => {
+      mockClient = {
+        sessionUpdate: vi.fn().mockResolvedValue({}),
+      };
+      agent = new AmpAcpAgent(mockClient, Promise.resolve(null));
+    });
+
+    it('creates new session with same thread context', async () => {
+      vi.useFakeTimers();
+      const { sessionId } = await agent.newSession({});
+      const originalSession = agent.sessions.get(sessionId);
+      originalSession.threadId = 'T-test-thread';
+      originalSession.currentModeId = 'plan';
+
+      const result = await agent.forkSession({ sessionId });
+
+      expect(result.sessionId).not.toBe(sessionId);
+      const forkedSession = agent.sessions.get(result.sessionId);
+      expect(forkedSession.threadId).toBe('T-test-thread');
+      expect(forkedSession.currentModeId).toBe('plan');
+      vi.useRealTimers();
+    });
+
+    it('throws error for non-existent session', async () => {
+      await expect(agent.forkSession({ sessionId: 'non-existent' })).rejects.toThrow('Session not found');
+    });
+  });
+
+  describe('listSessions', () => {
+    let agent;
+    let mockClient;
+
+    beforeEach(() => {
+      mockClient = {
+        sessionUpdate: vi.fn().mockResolvedValue({}),
+      };
+      agent = new AmpAcpAgent(mockClient, Promise.resolve(null));
+    });
+
+    it('returns empty list when no sessions exist', async () => {
+      const result = await agent.listSessions({});
+      expect(result.sessions).toEqual([]);
+      expect(result.total).toBe(0);
+      expect(result.nextCursor).toBeNull();
+    });
+
+    it('returns sessions sorted by lastActivityAt (most recent first)', async () => {
+      vi.useFakeTimers();
+      const { sessionId: id1 } = await agent.newSession({});
+      vi.advanceTimersByTime(1000);
+      const { sessionId: id2 } = await agent.newSession({});
+      vi.advanceTimersByTime(1000);
+      const { sessionId: id3 } = await agent.newSession({});
+
+      const result = await agent.listSessions({});
+
+      expect(result.sessions).toHaveLength(3);
+      expect(result.sessions[0].sessionId).toBe(id3);
+      expect(result.sessions[1].sessionId).toBe(id2);
+      expect(result.sessions[2].sessionId).toBe(id1);
+      vi.useRealTimers();
+    });
+
+    it('applies pagination with cursor and limit', async () => {
+      vi.useFakeTimers();
+      await agent.newSession({});
+      vi.advanceTimersByTime(100);
+      await agent.newSession({});
+      vi.advanceTimersByTime(100);
+      await agent.newSession({});
+
+      const result = await agent.listSessions({ cursor: 0, limit: 2 });
+
+      expect(result.sessions).toHaveLength(2);
+      expect(result.nextCursor).toBe(2);
+      expect(result.total).toBe(3);
+      vi.useRealTimers();
+    });
+
+    it('returns null nextCursor when no more pages', async () => {
+      vi.useFakeTimers();
+      await agent.newSession({});
+      await agent.newSession({});
+
+      const result = await agent.listSessions({ cursor: 0, limit: 10 });
+
+      expect(result.nextCursor).toBeNull();
+      vi.useRealTimers();
+    });
+  });
 });

@@ -56,6 +56,40 @@ export class AmpAcpAgent {
     }
   }
 
+  /**
+   * Queue a session update through the session's promise chain.
+   * Ensures serial execution and proper error handling.
+   *
+   * @param {string} sessionId - Session ID
+   * @param {object} notif - ACP notification object
+   * @param {object} options - Options
+   * @param {boolean} options.critical - If true, mark session as FAILED on error
+   */
+  _queueSessionUpdate(sessionId, notif, { critical = false } = {}) {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      logProtocol.warn('Cannot queue update for unknown session', { sessionId });
+      return;
+    }
+
+    session.chain = session.chain
+      .then(() => this._sessionUpdate(notif, { critical }))
+      .catch((e) => {
+        // Critical errors already logged by _sessionUpdate and re-thrown
+        // Mark session as failed to prevent further prompts
+        if (critical) {
+          const s = this.sessions.get(sessionId);
+          if (s) {
+            s.state = SessionState.FAILED;
+            logSession.error('Session marked FAILED due to critical update failure', { sessionId });
+          }
+        }
+        // Re-throw to break the chain on critical errors
+        // Non-critical errors are already logged by _sessionUpdate
+        if (critical) throw e;
+      });
+  }
+
   async initialize(_request) {
     this.clientCapabilities = _request.clientCapabilities;
     return {
@@ -64,7 +98,11 @@ export class AmpAcpAgent {
         loadSession: !isSdkBackend(), // Only CLI backend supports thread loading
         promptCapabilities: { image: true, audio: false, embeddedContext: true },
         mcpCapabilities: { http: false, sse: false },
-        sessionCapabilities: {},
+        sessionCapabilities: {
+          resume: {}, // Session resume support (in-memory only)
+          fork: {}, // Session fork support
+          // Note: list capability omitted - not part of stable ACP schema
+        },
       },
       authMethods: [],
     };
@@ -73,7 +111,26 @@ export class AmpAcpAgent {
   async newSession(_params) {
     const sessionId = `S-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
-    this.sessions.set(sessionId, {
+    this.sessions.set(sessionId, this._createSessionState());
+
+    logSession.info('Session created', { sessionId });
+    setImmediate(() => this._emitAvailableCommands(sessionId));
+
+    return this._buildSessionResponse(sessionId);
+  }
+
+  /**
+   * Create initial session state object.
+   * Shared by newSession, loadSession, and forkSession.
+   *
+   * @param {object} options - Optional overrides
+   * @param {string} options.threadId - Amp thread ID for continuation
+   * @param {boolean} options.isLoaded - Whether session was loaded from thread
+   * @param {string} options.loadedCwd - Working directory from loaded thread
+   * @returns {object} - Session state object
+   */
+  _createSessionState({ threadId = null, isLoaded = false, loadedCwd = undefined } = {}) {
+    return {
       state: SessionState.IDLE,
       proc: null,
       rl: null,
@@ -82,18 +139,16 @@ export class AmpAcpAgent {
       chain: Promise.resolve(),
       plan: [],
       activeToolCalls: new Map(),
+      ampToAcpToolIds: new Map(),
       currentModeId: 'default',
       terminals: new Map(),
       nestedTracker: new NestedToolTracker(),
       sentAvailableCommands: false,
-      threadId: null,
-      isLoaded: false,
-    });
-
-    logSession.info('Session created', { sessionId });
-    setImmediate(() => this._emitAvailableCommands(sessionId));
-
-    return this._buildSessionResponse(sessionId);
+      threadId,
+      isLoaded,
+      loadedCwd,
+      lastActivityAt: Date.now(), // Track for session list sorting
+    };
   }
 
   /**
@@ -114,8 +169,6 @@ export class AmpAcpAgent {
     }
 
     // SDK backend limitation: thread operations require CLI.
-    // The amp-sdk does not yet expose thread retrieval/continuation APIs.
-    // Once amp-sdk adds these APIs, this restriction can be removed.
     if (isSdkBackend()) {
       throw new RequestError(
         -32002,
@@ -130,25 +183,9 @@ export class AmpAcpAgent {
       throw new RequestError(-32002, `Thread not found: ${threadId}`);
     }
 
-    // Create session state
+    // Create session state using shared helper
     const sessionId = threadId; // Use thread ID as session ID for continuation
-    this.sessions.set(sessionId, {
-      state: SessionState.IDLE,
-      proc: null,
-      rl: null,
-      cancelled: false,
-      active: false,
-      chain: Promise.resolve(),
-      plan: [],
-      activeToolCalls: new Map(),
-      currentModeId: 'default',
-      terminals: new Map(),
-      nestedTracker: new NestedToolTracker(),
-      sentAvailableCommands: false,
-      threadId,
-      isLoaded: true,
-      loadedCwd: cwd,
-    });
+    this.sessions.set(sessionId, this._createSessionState({ threadId, isLoaded: true, loadedCwd: cwd }));
 
     logSession.info('Session loaded from thread', { sessionId, threadId });
     setImmediate(() => this._emitAvailableCommands(sessionId));
@@ -171,6 +208,122 @@ export class AmpAcpAgent {
     }
 
     return this._buildSessionResponse(sessionId);
+  }
+
+  /**
+   * Resume an existing in-memory session.
+   * Lighter weight than loadSession - just reattaches without replaying history.
+   *
+   * @param {Object} params - Resume session parameters
+   * @param {string} params.sessionId - Session ID to resume
+   * @returns {Promise<Object>} - Session info
+   */
+  async resumeSession(params) {
+    const { sessionId } = params;
+    const s = this.sessions.get(sessionId);
+
+    if (!s) {
+      throw new RequestError(-32002, `Session not found: ${sessionId}`);
+    }
+
+    if (s.state === SessionState.FAILED) {
+      throw new RequestError(-32002, `Session is in failed state and cannot be resumed: ${sessionId}`);
+    }
+
+    // Update last activity
+    s.lastActivityAt = Date.now();
+
+    logSession.info('Session resumed', { sessionId });
+
+    // Re-emit available commands and plan if present
+    setImmediate(() => this._emitAvailableCommands(sessionId));
+    if (s.plan?.length > 0) {
+      setImmediate(() => this._emitPlanUpdate(sessionId, s));
+    }
+
+    return this._buildSessionResponse(sessionId);
+  }
+
+  /**
+   * Fork an existing session to create an independent copy.
+   * The forked session shares the same thread context but operates independently.
+   *
+   * @param {Object} params - Fork session parameters
+   * @param {string} params.sessionId - Session ID to fork from
+   * @returns {Promise<Object>} - New session info
+   */
+  async forkSession(params) {
+    const { sessionId } = params;
+    const base = this.sessions.get(sessionId);
+
+    if (!base) {
+      throw new RequestError(-32002, `Session not found: ${sessionId}`);
+    }
+
+    // Generate new session ID
+    const newSessionId = `S-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+    // Create forked session with same thread context
+    this.sessions.set(
+      newSessionId,
+      this._createSessionState({
+        threadId: base.threadId,
+        isLoaded: base.isLoaded,
+        loadedCwd: base.loadedCwd,
+      })
+    );
+
+    // Copy current mode from parent
+    const forkedSession = this.sessions.get(newSessionId);
+    forkedSession.currentModeId = base.currentModeId;
+
+    logSession.info('Session forked', { from: sessionId, to: newSessionId, threadId: base.threadId });
+    setImmediate(() => this._emitAvailableCommands(newSessionId));
+
+    return this._buildSessionResponse(newSessionId);
+  }
+
+  /**
+   * List all active sessions with pagination.
+   *
+   * @param {Object} params - List parameters
+   * @param {number} [params.cursor=0] - Pagination cursor (offset)
+   * @param {number} [params.limit=50] - Maximum sessions to return
+   * @param {string} [params.cwd] - Filter by working directory
+   * @returns {Promise<Object>} - Sessions list with pagination
+   */
+  async listSessions(params = {}) {
+    const { cursor = 0, limit = 50, cwd } = params;
+
+    // Build list of sessions with metadata
+    let sessions = Array.from(this.sessions.entries()).map(([id, s]) => ({
+      sessionId: id,
+      state: s.state,
+      threadId: s.threadId,
+      isLoaded: s.isLoaded,
+      loadedCwd: s.loadedCwd,
+      currentModeId: s.currentModeId,
+      lastActivityAt: s.lastActivityAt || 0,
+      hasActivePlan: s.plan?.length > 0,
+    }));
+
+    // Filter by cwd if provided
+    if (cwd) {
+      sessions = sessions.filter((s) => s.loadedCwd === cwd || (!s.loadedCwd && !s.isLoaded));
+    }
+
+    // Sort by last activity (most recent first)
+    sessions.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+
+    // Apply pagination
+    const slice = sessions.slice(cursor, cursor + limit);
+    const nextCursor = cursor + slice.length < sessions.length ? cursor + slice.length : null;
+
+    return {
+      sessions: slice,
+      nextCursor,
+      total: sessions.length,
+    };
   }
 
   /**
@@ -257,6 +410,101 @@ export class AmpAcpAgent {
   }
 
   /**
+   * Process slash commands from user input.
+   * Handles mode commands (/plan, /code, /yolo) and agent commands (/oracle, /librarian, etc.)
+   *
+   * @param {string} sessionId - Session ID
+   * @param {object} session - Session state object
+   * @param {string} textInput - Raw text input from user
+   * @returns {object} - { textInput, earlyReturn } where earlyReturn is stop reason if command handled inline
+   */
+  async _processSlashCommands(sessionId, session, textInput) {
+    const commandMatch = textInput.trim().match(/^\/(\w+)(?:\s+(.*))?$/s);
+    if (!commandMatch) {
+      return { textInput, earlyReturn: null };
+    }
+
+    const [, cmdName, cmdArg] = commandMatch;
+
+    // Mode commands (change permission settings)
+    const modeId = config.commandToMode[cmdName];
+    if (modeId) {
+      await this.setSessionMode({ sessionId, modeId });
+      if (cmdArg?.trim()) {
+        return { textInput: cmdArg.trim() + '\n', earlyReturn: null };
+      }
+      await this.client.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `Switched to ${modeId} mode.` },
+        },
+      });
+      session.active = false;
+      return { textInput: '', earlyReturn: 'end_turn' };
+    }
+
+    // Agent commands (prepend prompt to trigger specific tools)
+    const promptPrefix = config.commandToPrompt[cmdName];
+    if (promptPrefix) {
+      if (!cmdArg?.trim()) {
+        await this.client.sessionUpdate({
+          sessionId,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `Usage: /${cmdName} <your request>` },
+          },
+        });
+        session.active = false;
+        return { textInput: '', earlyReturn: 'end_turn' };
+      }
+      logSession.debug('Agent command applied', { sessionId, command: cmdName });
+      return { textInput: promptPrefix + cmdArg.trim() + '\n', earlyReturn: null };
+    }
+
+    // Unknown command - pass through as regular input
+    return { textInput, earlyReturn: null };
+  }
+
+  /**
+   * Prepare final text input with images and mode prefixes.
+   *
+   * @param {string} textInput - Base text input
+   * @param {string[]} imagePaths - Array of saved image file paths
+   * @param {object[]} failedImages - Array of failed image info
+   * @param {string} modeId - Current mode ID
+   * @returns {string} - Final text input ready for backend
+   */
+  _buildFinalInput(textInput, imagePaths, failedImages, modeId) {
+    let finalInput = textInput;
+
+    if (imagePaths.length > 0) {
+      finalInput += '\n\n[Attached images:]\n';
+      for (const imgPath of imagePaths) {
+        finalInput += `${imgPath}\n`;
+      }
+    }
+
+    if (failedImages.length > 0) {
+      finalInput += '\n\n[Warning: Some image attachments failed to load:]\n';
+      for (const f of failedImages) {
+        finalInput += `- Image ${f.index}: ${f.error}\n`;
+      }
+    }
+
+    // Plan mode: inject system instruction for robustness
+    if (modeId === 'plan') {
+      const planPrefix =
+        '[PLAN MODE ACTIVE: You are in read-only analysis mode. ' +
+        'Analyze, research, and plan but do NOT write code or modify files. ' +
+        'If the user asks you to implement something, explain your plan instead.]\n\n';
+      finalInput = planPrefix + finalInput;
+    }
+
+    return finalInput;
+  }
+
+  /**
    * Handle a prompt request from the ACP client.
    *
    * Flow:
@@ -279,16 +527,18 @@ export class AmpAcpAgent {
     s.state = SessionState.ACTIVE;
     s.cancelled = false;
     s.active = true;
+    s.lastActivityAt = Date.now(); // Update activity timestamp
 
-    // Cleanup stale tool calls (>30 min old) before clearing
-    const staleThreshold = Date.now() - 30 * 60 * 1000;
+    // Cleanup stale tool calls before clearing
+    const staleThreshold = Date.now() - config.staleToolTimeoutMs;
     for (const [toolCallId, toolCall] of s.activeToolCalls) {
       if (toolCall.startTime < staleThreshold) {
-        logProtocol.warn('Cleaning up stale tool call', {
+        logProtocol.warn('Cleaning up orphaned tool call', {
           sessionId: params.sessionId,
           toolCallId,
           name: toolCall.name,
-          ageMinutes: Math.round((Date.now() - toolCall.startTime) / (60 * 1000)),
+          status: toolCall.lastStatus,
+          startTime: toolCall.startTime,
         });
         s.activeToolCalls.delete(toolCallId);
       }
@@ -328,46 +578,9 @@ export class AmpAcpAgent {
 
     // Handle slash commands
     let textInput = this._buildTextInput(params.prompt);
-    const commandMatch = textInput.trim().match(/^\/(\w+)(?:\s+(.*))?$/s);
-    if (commandMatch) {
-      const [, cmdName, cmdArg] = commandMatch;
-
-      // Mode commands (change permission settings)
-      const modeId = config.commandToMode[cmdName];
-      if (modeId) {
-        await this.setSessionMode({ sessionId: params.sessionId, modeId });
-        if (cmdArg?.trim()) {
-          textInput = cmdArg.trim() + '\n';
-        } else {
-          await this.client.sessionUpdate({
-            sessionId: params.sessionId,
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: `Switched to ${modeId} mode.` },
-            },
-          });
-          s.active = false;
-          return { stopReason: 'end_turn' };
-        }
-      }
-
-      // Agent commands (prepend prompt to trigger specific tools)
-      const promptPrefix = config.commandToPrompt[cmdName];
-      if (promptPrefix) {
-        if (!cmdArg?.trim()) {
-          await this.client.sessionUpdate({
-            sessionId: params.sessionId,
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: `Usage: /${cmdName} <your request>` },
-            },
-          });
-          s.active = false;
-          return { stopReason: 'end_turn' };
-        }
-        textInput = promptPrefix + cmdArg.trim() + '\n';
-        logSession.debug('Agent command applied', { sessionId: params.sessionId, command: cmdName });
-      }
+    const { textInput: processedInput, earlyReturn } = await this._processSlashCommands(params.sessionId, s, textInput);
+    if (earlyReturn) {
+      return { stopReason: earlyReturn };
     }
 
     // Create settings file for CLI backend (SDK uses buildAmpOptions instead)
@@ -392,29 +605,8 @@ export class AmpAcpAgent {
       failedImages,
     } = await this._saveImagesToTempFiles(params.prompt);
 
-    if (imagePaths.length > 0) {
-      textInput += '\n\n[Attached images:]\n';
-      for (const imgPath of imagePaths) {
-        textInput += `${imgPath}\n`;
-      }
-    }
-
-    if (failedImages.length > 0) {
-      textInput += '\n\n[Warning: Some image attachments failed to load:]\n';
-      for (const f of failedImages) {
-        textInput += `- Image ${f.index}: ${f.error}\n`;
-      }
-    }
-
-    // Plan mode: inject system instruction for robustness (hybrid approach)
-    // This supplements the tool disabling with explicit prompting
-    if (s.currentModeId === 'plan') {
-      const planPrefix =
-        '[PLAN MODE ACTIVE: You are in read-only analysis mode. ' +
-        'Analyze, research, and plan but do NOT write code or modify files. ' +
-        'If the user asks you to implement something, explain your plan instead.]\n\n';
-      textInput = planPrefix + textInput;
-    }
+    // Build final input with images and mode prefixes
+    textInput = this._buildFinalInput(processedInput, imagePaths, failedImages, s.currentModeId);
 
     // Timeout handling
     let timeoutTimer = null;
@@ -556,6 +748,19 @@ export class AmpAcpAgent {
   }
 
   /**
+   * Emit ACP notifications through the session's promise chain.
+   * Common helper for both CLI and SDK message processing.
+   *
+   * @param {string} sessionId - Session ID
+   * @param {Array} notifications - Array of ACP notification objects
+   */
+  _emitNotifications(sessionId, notifications) {
+    for (const notif of notifications) {
+      this._queueSessionUpdate(sessionId, notif);
+    }
+  }
+
+  /**
    * Process a CLI backend message.
    */
   async _processCliMessage(sessionId, session, item) {
@@ -615,15 +820,10 @@ export class AmpAcpAgent {
       sessionId,
       session.activeToolCalls,
       this.clientCapabilities,
-      session.nestedTracker
+      session.nestedTracker,
+      session.ampToAcpToolIds
     );
-    for (const notif of notifications) {
-      session.chain = session.chain
-        .then(() => this.client.sessionUpdate(notif))
-        .catch((e) => {
-          logProtocol.warn('sessionUpdate failed', { sessionId, error: e.message });
-        });
-    }
+    this._emitNotifications(sessionId, notifications);
   }
 
   /**
@@ -670,15 +870,10 @@ export class AmpAcpAgent {
       sessionId,
       session.activeToolCalls,
       this.clientCapabilities,
-      session.nestedTracker
+      session.nestedTracker,
+      session.ampToAcpToolIds
     );
-    for (const notif of notifications) {
-      session.chain = session.chain
-        .then(() => this.client.sessionUpdate(notif))
-        .catch((e) => {
-          logProtocol.warn('sessionUpdate failed', { sessionId, error: e.message });
-        });
-    }
+    this._emitNotifications(sessionId, notifications);
   }
 
   async _createAmpSettingsFileForMode(cwd, modeId) {
@@ -816,18 +1011,23 @@ export class AmpAcpAgent {
     session.terminals.clear();
   }
 
-  async _emitPlanUpdate(sessionId, session) {
-    try {
-      await this.client.sessionUpdate({
-        sessionId,
-        update: {
-          sessionUpdate: 'plan',
-          entries: session.plan,
-        },
-      });
-    } catch (e) {
-      logProtocol.warn('Failed to emit plan update', { sessionId, error: e.message });
-    }
+  /**
+   * Emit plan update notification.
+   */
+  _emitPlanUpdate(sessionId, session) {
+    if (!session.plan?.length) return;
+
+    this._queueSessionUpdate(sessionId, {
+      sessionId,
+      update: {
+        sessionUpdate: 'plan',
+        entries: session.plan.map((todo) => ({
+          id: todo.id,
+          content: todo.content,
+          status: todo.status,
+        })),
+      },
+    });
   }
 
   async cancel(params) {

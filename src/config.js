@@ -17,6 +17,21 @@ export const config = {
   // Prompt timeout in milliseconds (default: 10 minutes)
   timeoutMs: Number(process.env.AMP_ACP_TIMEOUT_MS) || 10 * 60 * 1000,
 
+  // Stale tool call cleanup threshold in milliseconds (default: 30 minutes)
+  staleToolTimeoutMs: Number(process.env.AMP_ACP_STALE_TOOL_TIMEOUT_MS) || 30 * 60 * 1000,
+
+  // Terminal lease duration in milliseconds (default: 5 minutes)
+  terminalLeaseMs: Number(process.env.AMP_ACP_TERMINAL_LEASE_MS) || 5 * 60 * 1000,
+
+  // Grace period for killing amp process on cancel in milliseconds (default: 2 seconds)
+  cancelGraceMs: Number(process.env.AMP_ACP_CANCEL_GRACE_MS) || 2000,
+
+  // Circuit breaker: number of failures before opening (default: 5)
+  circuitBreakerThreshold: Number(process.env.AMP_ACP_CIRCUIT_BREAKER_THRESHOLD) || 5,
+
+  // Circuit breaker: time before attempting recovery in milliseconds (default: 30 seconds)
+  circuitBreakerResetMs: Number(process.env.AMP_ACP_CIRCUIT_BREAKER_RESET_MS) || 30000,
+
   // ACP protocol version
   protocolVersion: 1,
 

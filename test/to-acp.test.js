@@ -275,8 +275,8 @@ describe('toAcpNotifications', () => {
       expect(result).toHaveLength(1); // Single tool_call with in_progress
       const newToolCallId = result[0].update.toolCallId;
       expect(newToolCallId).not.toBe('tool-123');
-      // ID format: {originalId}_{base36timestamp}_{random4chars}
-      expect(newToolCallId).toMatch(/^tool-123_[a-z0-9]+_[a-z0-9]+$/);
+      // ID format: {originalId}_{uuid8chars} (using crypto.randomUUID)
+      expect(newToolCallId).toMatch(/^tool-123_[a-f0-9]{8}$/);
     });
   });
 });
