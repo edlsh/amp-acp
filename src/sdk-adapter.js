@@ -284,6 +284,8 @@ export function sdkMessageToAcpNotifications(
     case 'user':
       if (Array.isArray(sdkMessage.message?.content)) {
         for (const chunk of sdkMessage.message.content) {
+          // Note: Unlike CLI path, SDK doesn't need validateStatusTransition() because
+          // tool_use and tool_result arrive in strict pairs from the SDK (no streaming timing issues)
           if (chunk.type === 'tool_result') {
             const isError = chunk.is_error;
             const status = isError ? 'failed' : 'completed';

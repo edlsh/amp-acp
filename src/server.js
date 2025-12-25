@@ -529,7 +529,7 @@ export class AmpAcpAgent {
     s.active = true;
     s.lastActivityAt = Date.now(); // Update activity timestamp
 
-    // Cleanup stale tool calls before clearing
+    // Log orphaned tool calls for debugging before clearing all
     const staleThreshold = Date.now() - config.staleToolTimeoutMs;
     for (const [toolCallId, toolCall] of s.activeToolCalls) {
       if (toolCall.startTime < staleThreshold) {
@@ -540,7 +540,6 @@ export class AmpAcpAgent {
           status: toolCall.lastStatus,
           startTime: toolCall.startTime,
         });
-        s.activeToolCalls.delete(toolCallId);
       }
     }
 
@@ -973,7 +972,7 @@ export class AmpAcpAgent {
       session.terminals.set(chunk.id, {
         terminal,
         createdAt: Date.now(),
-        leaseMs: 5 * 60 * 1000,
+        leaseMs: config.terminalLeaseMs,
       });
       await this.client.sessionUpdate({
         sessionId,
