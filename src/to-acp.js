@@ -82,6 +82,7 @@ export class NestedToolTracker {
    * Get full content array for a parent tool (ACP replaces content on each update)
    * Returns array of content objects ready for ACP tool_call_update
    */
+  // eslint-disable-next-line complexity
   getContentArray(parentId) {
     const stats = this.parentStats.get(parentId);
     if (!stats) return [];
@@ -161,6 +162,7 @@ export class NestedToolTracker {
   }
 }
 
+// eslint-disable-next-line complexity
 export function toAcpNotifications(
   msg,
   sessionId,
@@ -256,6 +258,7 @@ export function toAcpNotifications(
     return true;
   };
 
+  /* eslint-disable max-depth */
   switch (msg.type) {
     case 'system':
       if (msg.subtype === 'init') {
@@ -444,6 +447,7 @@ export function toAcpNotifications(
     default:
       break;
   }
+  /* eslint-enable max-depth */
 
   return output;
 }

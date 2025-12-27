@@ -226,6 +226,24 @@ export function getToolKind(name) {
   return 'other';
 }
 
+// Tool title formatters: each returns a formatted title or null to use default
+const toolTitleFormatters = {
+  Read: (input) => (input?.path ? `Read ${shortenPath(input.path)}` : null),
+  Grep: (input) => (input?.pattern ? `Grep "${truncate(input.pattern, 30)}"` : null),
+  glob: (input) => (input?.filePattern ? `glob ${truncate(input.filePattern, 40)}` : null),
+  finder: (input) => (input?.query ? `finder: ${truncate(input.query, 40)}` : null),
+  Bash: (input) => (input?.cmd ? `Bash: ${truncate(input.cmd, 50)}` : null),
+  edit_file: (input) => (input?.path ? `Edit ${shortenPath(input.path)}` : null),
+  create_file: (input) => (input?.path ? `Create ${shortenPath(input.path)}` : null),
+  Task: (input) => (input?.description ? truncate(input.description, 50) : 'Task'),
+  TaskOutput: () => 'TaskOutput',
+  oracle: (input) => (input?.task ? truncate(input.task, 50) : 'Oracle'),
+  todo_write: () => 'Update Plan',
+  todo_read: () => 'Read Plan',
+  web_search: (input) => (input?.query ? `Search: ${truncate(input.query, 40)}` : null),
+  read_web_page: (input) => (input?.url ? `Fetch ${truncate(input.url, 50)}` : null),
+};
+
 /**
  * Get display title for a tool, including context from input when available
  */
@@ -233,51 +251,12 @@ export function getToolTitle(name, parentToolUseId, input) {
   const prefix = parentToolUseId ? '[Subagent] ' : '';
   if (!name) return prefix + 'Unknown';
 
-  // Generate contextual titles based on tool input
-  switch (name) {
-    case 'Read':
-      if (input?.path) return prefix + `Read ${shortenPath(input.path)}`;
-      break;
-    case 'Grep':
-      if (input?.pattern) return prefix + `Grep "${truncate(input.pattern, 30)}"`;
-      break;
-    case 'glob':
-      if (input?.filePattern) return prefix + `glob ${truncate(input.filePattern, 40)}`;
-      break;
-    case 'finder':
-      if (input?.query) return prefix + `finder: ${truncate(input.query, 40)}`;
-      break;
-    case 'Bash':
-      if (input?.cmd) return prefix + `Bash: ${truncate(input.cmd, 50)}`;
-      break;
-    case 'edit_file':
-      if (input?.path) return prefix + `Edit ${shortenPath(input.path)}`;
-      break;
-    case 'create_file':
-      if (input?.path) return prefix + `Create ${shortenPath(input.path)}`;
-      break;
-    case 'Task':
-      // Show just the description to match Claude Code style
-      if (input?.description) return prefix + truncate(input.description, 50);
-      return prefix + 'Task';
-    case 'TaskOutput':
-      return prefix + 'TaskOutput';
-    case 'oracle':
-      if (input?.task) return prefix + truncate(input.task, 50);
-      return prefix + 'Oracle';
-    case 'todo_write':
-      return prefix + 'Update Plan';
-    case 'todo_read':
-      return prefix + 'Read Plan';
-    case 'web_search':
-      if (input?.query) return prefix + `Search: ${truncate(input.query, 40)}`;
-      break;
-    case 'read_web_page':
-      if (input?.url) return prefix + `Fetch ${truncate(input.url, 50)}`;
-      break;
+  const formatter = toolTitleFormatters[name];
+  if (formatter) {
+    const title = formatter(input);
+    if (title) return prefix + title;
   }
 
-  // MCP tools
   if (name.startsWith('mcp__')) {
     const parts = name.replace('mcp__', '').split('__');
     return prefix + `MCP: ${parts.join('.')}`;
@@ -333,42 +312,35 @@ export function getToolLocations(name, input) {
   return [];
 }
 
+// Inline description formatters for child tool embedding
+const inlineDescriptionFormatters = {
+  Read: (input) => (input?.path ? `Read ${shortenPath(input.path)}` : 'Read'),
+  Grep: (input) => (input?.pattern ? `Grep "${truncate(input.pattern, 25)}"` : 'Grep'),
+  glob: (input) => (input?.filePattern ? `glob ${truncate(input.filePattern, 30)}` : 'glob'),
+  finder: (input) => (input?.query ? `finder: ${truncate(input.query, 30)}` : 'finder'),
+  Bash: (input) => (input?.cmd ? `Bash: ${truncate(input.cmd, 40)}` : 'Bash'),
+  edit_file: (input) => (input?.path ? `Edit ${shortenPath(input.path)}` : 'edit_file'),
+  create_file: (input) => (input?.path ? `Create ${shortenPath(input.path)}` : 'create_file'),
+  Task: (input) => (input?.description ? truncate(input.description, 40) : 'Task'),
+  TaskOutput: () => 'TaskOutput',
+  oracle: (input) => (input?.task ? truncate(input.task, 40) : 'Oracle'),
+  web_search: (input) => (input?.query ? `Search: ${truncate(input.query, 30)}` : 'web_search'),
+  read_web_page: (input) => (input?.url ? `Fetch ${truncate(input.url, 40)}` : 'read_web_page'),
+};
+
 /**
  * Get a short inline description for embedding child tool calls in parent content
  */
 export function getInlineToolDescription(name, input) {
-  switch (name) {
-    case 'Read':
-      return input?.path ? `Read ${shortenPath(input.path)}` : 'Read';
-    case 'Grep':
-      return input?.pattern ? `Grep "${truncate(input.pattern, 25)}"` : 'Grep';
-    case 'glob':
-      return input?.filePattern ? `glob ${truncate(input.filePattern, 30)}` : 'glob';
-    case 'finder':
-      return input?.query ? `finder: ${truncate(input.query, 30)}` : 'finder';
-    case 'Bash':
-      return input?.cmd ? `Bash: ${truncate(input.cmd, 40)}` : 'Bash';
-    case 'edit_file':
-      return input?.path ? `Edit ${shortenPath(input.path)}` : 'edit_file';
-    case 'create_file':
-      return input?.path ? `Create ${shortenPath(input.path)}` : 'create_file';
-    case 'Task':
-      return input?.description ? truncate(input.description, 40) : 'Task';
-    case 'TaskOutput':
-      return 'TaskOutput';
-    case 'oracle':
-      return input?.task ? truncate(input.task, 40) : 'Oracle';
-    case 'web_search':
-      return input?.query ? `Search: ${truncate(input.query, 30)}` : 'web_search';
-    case 'read_web_page':
-      return input?.url ? `Fetch ${truncate(input.url, 40)}` : 'read_web_page';
-    default:
-      if (name?.startsWith('mcp__')) {
-        const parts = name.replace('mcp__', '').split('__');
-        return `MCP: ${parts.join('.')}`;
-      }
-      return name || 'Unknown';
+  const formatter = inlineDescriptionFormatters[name];
+  if (formatter) return formatter(input);
+
+  if (name?.startsWith('mcp__')) {
+    const parts = name.replace('mcp__', '').split('__');
+    return `MCP: ${parts.join('.')}`;
   }
+
+  return name || 'Unknown';
 }
 
 /**

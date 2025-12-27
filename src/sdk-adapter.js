@@ -14,6 +14,7 @@ import { randomUUID } from 'node:crypto';
  * @param {object} sdkMessage - Message from @sourcegraph/amp-sdk
  * @returns {object|null} - Amp CLI JSON message or null if no mapping
  */
+// eslint-disable-next-line complexity
 export function adaptSdkMessage(sdkMessage) {
   if (!sdkMessage?.type) return null;
 
@@ -123,6 +124,7 @@ function adaptUserContent(content) {
  * @param {Map} ampToAcpToolIds - Persistent SDK→ACP ID mapping for tool result correlation
  * @returns {Array} - Array of ACP notification objects
  */
+// eslint-disable-next-line complexity
 export function sdkMessageToAcpNotifications(
   sdkMessage,
   sessionId,
@@ -186,6 +188,7 @@ export function sdkMessageToAcpNotifications(
     return null;
   };
 
+  /* eslint-disable max-depth */
   switch (sdkMessage.type) {
     case 'system':
       // Emit session info as thought (like CLI thread URL)
@@ -348,6 +351,7 @@ export function sdkMessageToAcpNotifications(
       }
       break;
   }
+  /* eslint-enable max-depth */
 
   return output;
 }
@@ -468,6 +472,7 @@ export function extractPlanFromSdkToolUse(chunk) {
  *   - plans: Array of {type: 'write'|'read', toolUseId, todos?} for plan updates
  *   - terminalReleases: Array of {toolUseId} for completed Bash tools
  */
+// eslint-disable-next-line complexity
 export function extractSdkTerminalAndPlanActions(sdkMessage) {
   const result = {
     terminals: [],

@@ -515,6 +515,7 @@ export class AmpAcpAgent {
    * 5. Stream notifications to client
    * 6. Cleanup and return stop reason
    */
+  // eslint-disable-next-line complexity
   async prompt(params) {
     const s = this.sessions.get(params.sessionId);
     if (!s) throw new RequestError(-32002, 'Session not found');
@@ -762,6 +763,7 @@ export class AmpAcpAgent {
   /**
    * Process a CLI backend message.
    */
+  // eslint-disable-next-line complexity
   async _processCliMessage(sessionId, session, item) {
     if (item.type === 'text' || item.type === 'error') {
       // Non-JSON line or error message
