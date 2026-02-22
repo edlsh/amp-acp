@@ -8,6 +8,31 @@
   },
   "description": "ACP adapter that bridges Amp CLI to Agent Client Protocol (Zed external agent)",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/edlsh/amp-acp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/edlsh/amp-acp/issues"
+  },
+  "homepage": "https://github.com/edlsh/amp-acp#readme",
+  "keywords": [
+    "acp",
+    "agent-client-protocol",
+    "zed",
+    "amp",
+    "adapter"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "src/",
+    "img/",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
   "scripts": {
     "start": "node src/index.js",
     "lint": "eslint src test && prettier --check .",

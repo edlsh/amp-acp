@@ -46,11 +46,11 @@ Use [Amp](https://ampcode.com) from [ACP](https://agentclientprotocol.com/)-comp
 
 ## Environment Variables
 
-| Variable              | Description                                                                                     | Default           |
-| --------------------- | ----------------------------------------------------------------------------------------------- | ----------------- |
-| `AMP_EXECUTABLE`      | Path to Amp CLI binary                                                                          | `amp`             |
-| `AMP_ACP_TIMEOUT_MS`  | Prompt timeout in milliseconds                                                                  | `600000` (10 min) |
-| `AMP_ACP_NESTED_MODE` | How to display subagent tool calls: `inline` (embed in parent) or `separate` (individual cards) | `inline`          |
+| Variable              | Description                                                                                                                                            | Default           |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------- |
+| `AMP_EXECUTABLE`      | Path to Amp CLI binary                                                                                                                                 | `amp`             |
+| `AMP_ACP_TIMEOUT_MS`  | Prompt timeout in milliseconds                                                                                                                         | `600000` (10 min) |
+| `AMP_ACP_NESTED_MODE` | How to display subagent tool calls: `flat` (independent cards, default), `inline` (embed in parent), or `separate` (individual cards with parent link) | `flat`            |
 
 <details>
 <summary><strong>Advanced / Debugging Variables</strong></summary>
