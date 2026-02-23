@@ -7,17 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.4.0](https://github.com/edlsh/amp-acp/compare/v0.3.0...v0.4.0) (2026-02-23)
 
-
 ### Features
 
-* add session management, fix tool ID handling, configurable timeouts ([b3855a5](https://github.com/edlsh/amp-acp/commit/b3855a5b928f9cecfd3ad08570f5394898719bdf))
-* upgrade ACP SDK and add config/session/usage updates ([47a0a55](https://github.com/edlsh/amp-acp/commit/47a0a556a469e844b53239fbf10dc4e72094b4c2))
-
+- add session management, fix tool ID handling, configurable timeouts ([b3855a5](https://github.com/edlsh/amp-acp/commit/b3855a5b928f9cecfd3ad08570f5394898719bdf))
+- upgrade ACP SDK and add config/session/usage updates ([47a0a55](https://github.com/edlsh/amp-acp/commit/47a0a556a469e844b53239fbf10dc4e72094b4c2))
 
 ### Bug Fixes
 
-* resolve CI failures with coverage and ESLint fixes ([68218ed](https://github.com/edlsh/amp-acp/commit/68218edc1478dc8f627c3e99c14ac216b27eeb65))
-* use config.terminalLeaseMs and clarify code patterns ([17144a8](https://github.com/edlsh/amp-acp/commit/17144a83d48c899b682c598dc989948de80c9785))
+- resolve CI failures with coverage and ESLint fixes ([68218ed](https://github.com/edlsh/amp-acp/commit/68218edc1478dc8f627c3e99c14ac216b27eeb65))
+- use config.terminalLeaseMs and clarify code patterns ([17144a8](https://github.com/edlsh/amp-acp/commit/17144a83d48c899b682c598dc989948de80c9785))
 
 ## [Unreleased]
 
