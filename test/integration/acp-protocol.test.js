@@ -59,6 +59,15 @@ describe('ACP Protocol Integration', () => {
           }),
         })
       );
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: sessionResult.sessionId,
+          update: expect.objectContaining({
+            sessionUpdate: 'session_info_update',
+            updatedAt: expect.any(String),
+          }),
+        })
+      );
     });
 
     it('handles session not found error', async () => {
@@ -137,6 +146,64 @@ describe('ACP Protocol Integration', () => {
           currentModeId: 'acceptEdits',
         },
       });
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: session.sessionId,
+          update: expect.objectContaining({
+            sessionUpdate: 'session_info_update',
+            updatedAt: expect.any(String),
+          }),
+        })
+      );
+    });
+  });
+
+  describe('Session Config Options', () => {
+    it('returns config options in newSession response', async () => {
+      const session = await agent.newSession({});
+
+      expect(session.configOptions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: 'mode', category: 'mode', type: 'select' }),
+          expect.objectContaining({ id: 'model', category: 'model', type: 'select' }),
+        ])
+      );
+    });
+
+    it('setSessionConfigOption updates mode and emits config_option_update', async () => {
+      vi.useFakeTimers();
+      const session = await agent.newSession({});
+      await vi.runAllTimersAsync();
+      mockClient.sessionUpdate.mockClear();
+
+      const result = await agent.setSessionConfigOption({
+        sessionId: session.sessionId,
+        configId: 'mode',
+        value: 'plan',
+      });
+
+      expect(result.configOptions.find((c) => c.id === 'mode')?.currentValue).toBe('plan');
+      expect(agent.sessions.get(session.sessionId).currentModeId).toBe('plan');
+
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'config_option_update',
+          configOptions: expect.any(Array),
+        },
+      });
+    });
+
+    it('setSessionConfigOption rejects unknown config id', async () => {
+      const session = await agent.newSession({});
+
+      await expect(
+        agent.setSessionConfigOption({
+          sessionId: session.sessionId,
+          configId: 'unknown',
+          value: 'x',
+        })
+      ).rejects.toThrow('Unknown config option');
     });
   });
 

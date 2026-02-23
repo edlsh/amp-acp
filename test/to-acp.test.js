@@ -198,6 +198,47 @@ describe('toAcpNotifications', () => {
       const result = toAcpNotifications(msg, sessionId);
       expect(result[0].update.content.text).toContain('Max turns exceeded');
     });
+
+    it('emits usage_update when usage payload is present', () => {
+      const msg = {
+        type: 'result',
+        subtype: 'success',
+        usage: {
+          input_tokens: 120,
+          output_tokens: 30,
+          total_tokens: 150,
+        },
+      };
+
+      const result = toAcpNotifications(msg, sessionId);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].update).toEqual({
+        sessionUpdate: 'usage_update',
+        size: 150,
+        used: 150,
+      });
+    });
+
+    it('emits usage_update alongside error notifications', () => {
+      const msg = {
+        type: 'result',
+        subtype: 'error_during_execution',
+        error: 'Something went wrong',
+        usage: {
+          inputTokens: 10,
+          outputTokens: 5,
+          totalTokens: 15,
+        },
+      };
+
+      const result = toAcpNotifications(msg, sessionId);
+
+      expect(result).toHaveLength(2);
+      expect(result[0].update.sessionUpdate).toBe('usage_update');
+      expect(result[0].update.used).toBe(15);
+      expect(result[1].update.sessionUpdate).toBe('agent_message_chunk');
+    });
   });
 
   describe('unknown message types', () => {

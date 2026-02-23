@@ -349,6 +349,48 @@ describe('sdkMessageToAcpNotifications', () => {
       const result = sdkMessageToAcpNotifications(sdkMsg, sessionId);
       expect(result).toHaveLength(0);
     });
+
+    it('emits usage_update when usage payload is present', () => {
+      const sdkMsg = {
+        type: 'result',
+        subtype: 'success',
+        usage: {
+          input_tokens: 42,
+          output_tokens: 8,
+          total_tokens: 50,
+        },
+      };
+
+      const result = sdkMessageToAcpNotifications(sdkMsg, sessionId);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].update).toEqual({
+        sessionUpdate: 'usage_update',
+        size: 50,
+        used: 50,
+      });
+    });
+
+    it('emits usage_update alongside error notifications', () => {
+      const sdkMsg = {
+        type: 'result',
+        subtype: 'error_during_execution',
+        error: 'Execution failed',
+        is_error: true,
+        usage: {
+          inputTokens: 3,
+          outputTokens: 2,
+          totalTokens: 5,
+        },
+      };
+
+      const result = sdkMessageToAcpNotifications(sdkMsg, sessionId);
+
+      expect(result).toHaveLength(2);
+      expect(result[0].update.sessionUpdate).toBe('usage_update');
+      expect(result[0].update.used).toBe(5);
+      expect(result[1].update.sessionUpdate).toBe('agent_message_chunk');
+    });
   });
 
   describe('tool call tracking', () => {

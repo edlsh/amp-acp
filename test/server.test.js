@@ -1,5 +1,7 @@
 /* eslint-disable max-nested-callbacks */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { TransformStream } from 'node:stream/web';
+import { AgentSideConnection } from '@agentclientprotocol/sdk';
 import { AmpAcpAgent } from '../src/server.js';
 
 describe('AmpAcpAgent', () => {
@@ -194,14 +196,19 @@ describe('AmpAcpAgent', () => {
       const result = await agent.newSession({});
       await vi.runAllTimersAsync();
 
+      const countAvailableCommandsUpdates = () =>
+        mockClient.sessionUpdate.mock.calls.filter(
+          (call) => call[0]?.update?.sessionUpdate === 'available_commands_update'
+        ).length;
+
       // First emission
-      expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1);
+      expect(countAvailableCommandsUpdates()).toBe(1);
 
       // Try to emit again
       await agent._emitAvailableCommands(result.sessionId);
 
       // Should still be 1 (idempotent)
-      expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1);
+      expect(countAvailableCommandsUpdates()).toBe(1);
     });
 
     it('emits in prompt fallback if not yet sent', async () => {
@@ -488,6 +495,157 @@ describe('AmpAcpAgent', () => {
 
       expect(result.nextCursor).toBeNull();
       vi.useRealTimers();
+    });
+  });
+
+  describe('ACP SDK routing for unstable session methods', () => {
+    function createConnection(agent) {
+      const inbound = new TransformStream();
+      const outbound = new TransformStream();
+
+      const connection = new AgentSideConnection(() => agent, {
+        readable: inbound.readable,
+        writable: outbound.writable,
+      });
+
+      const requestWriter = inbound.writable.getWriter();
+      const responseReader = outbound.readable.getReader();
+
+      async function sendRequest(id, method, params = {}) {
+        await requestWriter.write({ jsonrpc: '2.0', id, method, params });
+
+        while (true) {
+          const { value, done } = await responseReader.read();
+          if (done) {
+            throw new Error(`Connection closed while waiting for response to ${method}`);
+          }
+
+          if ('id' in value && value.id === id) {
+            return value;
+          }
+        }
+      }
+
+      async function close() {
+        await requestWriter.close();
+        await connection.closed;
+        requestWriter.releaseLock();
+        responseReader.releaseLock();
+      }
+
+      return { sendRequest, close };
+    }
+
+    it('routes session/resume via AgentSideConnection', async () => {
+      const mockClient = {
+        sessionUpdate: vi.fn().mockResolvedValue({}),
+      };
+      const agent = new AmpAcpAgent(mockClient, Promise.resolve(null));
+      const { sendRequest, close } = createConnection(agent);
+
+      const newSessionResponse = await sendRequest(1, 'session/new', {
+        cwd: '/tmp',
+        mcpServers: [],
+      });
+      expect(newSessionResponse).toHaveProperty('result.sessionId');
+      const sessionId = newSessionResponse.result.sessionId;
+
+      const resumeResponse = await sendRequest(2, 'session/resume', {
+        sessionId,
+        cwd: '/tmp',
+        mcpServers: [],
+      });
+
+      expect(resumeResponse).toHaveProperty('result.sessionId', sessionId);
+      await close();
+    });
+
+    it('routes session/fork via AgentSideConnection', async () => {
+      const mockClient = {
+        sessionUpdate: vi.fn().mockResolvedValue({}),
+      };
+      const agent = new AmpAcpAgent(mockClient, Promise.resolve(null));
+      const { sendRequest, close } = createConnection(agent);
+
+      const newSessionResponse = await sendRequest(1, 'session/new', {
+        cwd: '/tmp',
+        mcpServers: [],
+      });
+      const sessionId = newSessionResponse.result.sessionId;
+
+      const forkResponse = await sendRequest(2, 'session/fork', {
+        sessionId,
+        cwd: '/tmp',
+        mcpServers: [],
+      });
+
+      expect(forkResponse).toHaveProperty('result.sessionId');
+      expect(forkResponse.result.sessionId).not.toBe(sessionId);
+      await close();
+    });
+
+    it('routes session/set_model via AgentSideConnection', async () => {
+      const mockClient = {
+        sessionUpdate: vi.fn().mockResolvedValue({}),
+      };
+      const agent = new AmpAcpAgent(mockClient, Promise.resolve(null));
+      const { sendRequest, close } = createConnection(agent);
+
+      const newSessionResponse = await sendRequest(1, 'session/new', {
+        cwd: '/tmp',
+        mcpServers: [],
+      });
+      const sessionId = newSessionResponse.result.sessionId;
+
+      const setModelResponse = await sendRequest(2, 'session/set_model', {
+        sessionId,
+        modelId: 'default',
+      });
+
+      expect(setModelResponse).toHaveProperty('result');
+      expect(setModelResponse.result).toEqual({});
+      await close();
+    });
+
+    it('routes session/set_config_option via AgentSideConnection', async () => {
+      const mockClient = {
+        sessionUpdate: vi.fn().mockResolvedValue({}),
+      };
+      const agent = new AmpAcpAgent(mockClient, Promise.resolve(null));
+      const { sendRequest, close } = createConnection(agent);
+
+      const newSessionResponse = await sendRequest(1, 'session/new', {
+        cwd: '/tmp',
+        mcpServers: [],
+      });
+      const sessionId = newSessionResponse.result.sessionId;
+
+      const setConfigResponse = await sendRequest(2, 'session/set_config_option', {
+        sessionId,
+        configId: 'mode',
+        value: 'plan',
+      });
+
+      expect(setConfigResponse).toHaveProperty('result.configOptions');
+      expect(setConfigResponse.result.configOptions.find((c) => c.id === 'mode')?.currentValue).toBe('plan');
+      await close();
+    });
+
+    it('routes session/list via AgentSideConnection', async () => {
+      const mockClient = {
+        sessionUpdate: vi.fn().mockResolvedValue({}),
+      };
+      const agent = new AmpAcpAgent(mockClient, Promise.resolve(null));
+      const { sendRequest, close } = createConnection(agent);
+
+      await sendRequest(1, 'session/new', { cwd: '/tmp', mcpServers: [] });
+      await sendRequest(2, 'session/new', { cwd: '/tmp', mcpServers: [] });
+
+      const listResponse = await sendRequest(3, 'session/list', { cwd: '/tmp' });
+
+      expect(listResponse).toHaveProperty('result.sessions');
+      expect(listResponse.result.sessions).toHaveLength(2);
+      await close();
     });
   });
 });

@@ -101,20 +101,21 @@ export class AmpAcpAgent {
         sessionCapabilities: {
           resume: {}, // Session resume support (in-memory only)
           fork: {}, // Session fork support
-          // Note: list capability omitted - not part of stable ACP schema
+          list: {}, // Session list support
         },
       },
       authMethods: [],
     };
   }
 
-  async newSession(_params) {
+  async newSession(params = {}) {
     const sessionId = `S-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
-    this.sessions.set(sessionId, this._createSessionState());
+    this.sessions.set(sessionId, this._createSessionState({ cwd: params.cwd || process.cwd() }));
 
     logSession.info('Session created', { sessionId });
     setImmediate(() => this._emitAvailableCommands(sessionId));
+    setImmediate(() => this._emitSessionInfoUpdate(sessionId));
 
     return this._buildSessionResponse(sessionId);
   }
@@ -127,9 +128,10 @@ export class AmpAcpAgent {
    * @param {string} options.threadId - Amp thread ID for continuation
    * @param {boolean} options.isLoaded - Whether session was loaded from thread
    * @param {string} options.loadedCwd - Working directory from loaded thread
+   * @param {string} options.cwd - Default working directory for new prompts
    * @returns {object} - Session state object
    */
-  _createSessionState({ threadId = null, isLoaded = false, loadedCwd = undefined } = {}) {
+  _createSessionState({ threadId = null, isLoaded = false, loadedCwd = undefined, cwd = process.cwd() } = {}) {
     return {
       state: SessionState.IDLE,
       proc: null,
@@ -141,12 +143,14 @@ export class AmpAcpAgent {
       activeToolCalls: new Map(),
       ampToAcpToolIds: new Map(),
       currentModeId: 'default',
+      currentModelId: 'default',
       terminals: new Map(),
       nestedTracker: new NestedToolTracker(),
       sentAvailableCommands: false,
       threadId,
       isLoaded,
       loadedCwd,
+      cwd,
       lastActivityAt: Date.now(), // Track for session list sorting
     };
   }
@@ -185,10 +189,11 @@ export class AmpAcpAgent {
 
     // Create session state using shared helper
     const sessionId = threadId; // Use thread ID as session ID for continuation
-    this.sessions.set(sessionId, this._createSessionState({ threadId, isLoaded: true, loadedCwd: cwd }));
+    this.sessions.set(sessionId, this._createSessionState({ threadId, isLoaded: true, loadedCwd: cwd, cwd }));
 
     logSession.info('Session loaded from thread', { sessionId, threadId });
     setImmediate(() => this._emitAvailableCommands(sessionId));
+    setImmediate(() => this._emitSessionInfoUpdate(sessionId));
 
     // Replay thread history as agent_message_chunk notifications
     if (markdown.trim()) {
@@ -218,7 +223,7 @@ export class AmpAcpAgent {
    * @param {string} params.sessionId - Session ID to resume
    * @returns {Promise<Object>} - Session info
    */
-  async resumeSession(params) {
+  async unstable_resumeSession(params) {
     const { sessionId } = params;
     const s = this.sessions.get(sessionId);
 
@@ -237,11 +242,17 @@ export class AmpAcpAgent {
 
     // Re-emit available commands and plan if present
     setImmediate(() => this._emitAvailableCommands(sessionId));
+    setImmediate(() => this._emitSessionInfoUpdate(sessionId));
     if (s.plan?.length > 0) {
       setImmediate(() => this._emitPlanUpdate(sessionId, s));
     }
 
     return this._buildSessionResponse(sessionId);
+  }
+
+  // Backward-compatible alias for pre-0.13 ACP SDK method naming.
+  async resumeSession(params) {
+    return this.unstable_resumeSession(params);
   }
 
   /**
@@ -252,7 +263,7 @@ export class AmpAcpAgent {
    * @param {string} params.sessionId - Session ID to fork from
    * @returns {Promise<Object>} - New session info
    */
-  async forkSession(params) {
+  async unstable_forkSession(params) {
     const { sessionId } = params;
     const base = this.sessions.get(sessionId);
 
@@ -270,6 +281,7 @@ export class AmpAcpAgent {
         threadId: base.threadId,
         isLoaded: base.isLoaded,
         loadedCwd: base.loadedCwd,
+        cwd: base.cwd,
       })
     );
 
@@ -279,45 +291,65 @@ export class AmpAcpAgent {
 
     logSession.info('Session forked', { from: sessionId, to: newSessionId, threadId: base.threadId });
     setImmediate(() => this._emitAvailableCommands(newSessionId));
+    setImmediate(() => this._emitSessionInfoUpdate(newSessionId));
 
     return this._buildSessionResponse(newSessionId);
+  }
+
+  // Backward-compatible alias for pre-0.13 ACP SDK method naming.
+  async forkSession(params) {
+    return this.unstable_forkSession(params);
   }
 
   /**
    * List all active sessions with pagination.
    *
    * @param {Object} params - List parameters
-   * @param {number} [params.cursor=0] - Pagination cursor (offset)
-   * @param {number} [params.limit=50] - Maximum sessions to return
+   * @param {number|string|null} [params.cursor=0] - Pagination cursor (offset)
+   * @param {number} [params.limit=50] - Maximum sessions to return (non-ACP extension)
    * @param {string} [params.cwd] - Filter by working directory
    * @returns {Promise<Object>} - Sessions list with pagination
    */
-  async listSessions(params = {}) {
+  async unstable_listSessions(params = {}) {
     const { cursor = 0, limit = 50, cwd } = params;
 
+    const cursorOffset =
+      typeof cursor === 'string' ? Number.parseInt(cursor, 10) : typeof cursor === 'number' ? cursor : 0;
+    const offset = Number.isFinite(cursorOffset) && cursorOffset >= 0 ? cursorOffset : 0;
+    const pageLimit = typeof limit === 'number' && Number.isFinite(limit) && limit > 0 ? limit : 50;
+
     // Build list of sessions with metadata
-    let sessions = Array.from(this.sessions.entries()).map(([id, s]) => ({
-      sessionId: id,
-      state: s.state,
-      threadId: s.threadId,
-      isLoaded: s.isLoaded,
-      loadedCwd: s.loadedCwd,
-      currentModeId: s.currentModeId,
-      lastActivityAt: s.lastActivityAt || 0,
-      hasActivePlan: s.plan?.length > 0,
-    }));
+    let sessions = Array.from(this.sessions.entries()).map(([id, s]) => {
+      const sessionCwd = s.loadedCwd || s.cwd || process.cwd();
+      return {
+        // ACP fields
+        sessionId: id,
+        cwd: sessionCwd,
+        updatedAt: new Date(s.lastActivityAt || Date.now()).toISOString(),
+
+        // Additional metadata (non-ACP extension fields)
+        state: s.state,
+        threadId: s.threadId,
+        isLoaded: s.isLoaded,
+        loadedCwd: s.loadedCwd,
+        currentModeId: s.currentModeId,
+        lastActivityAt: s.lastActivityAt || 0,
+        hasActivePlan: s.plan?.length > 0,
+      };
+    });
 
     // Filter by cwd if provided
     if (cwd) {
-      sessions = sessions.filter((s) => s.loadedCwd === cwd || (!s.loadedCwd && !s.isLoaded));
+      sessions = sessions.filter((sessionInfo) => sessionInfo.cwd === cwd);
     }
 
     // Sort by last activity (most recent first)
     sessions.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
 
     // Apply pagination
-    const slice = sessions.slice(cursor, cursor + limit);
-    const nextCursor = cursor + slice.length < sessions.length ? cursor + slice.length : null;
+    const slice = sessions.slice(offset, offset + pageLimit);
+    const nextOffset = offset + slice.length < sessions.length ? offset + slice.length : null;
+    const nextCursor = nextOffset === null ? null : typeof cursor === 'string' ? String(nextOffset) : nextOffset;
 
     return {
       sessions: slice,
@@ -326,40 +358,92 @@ export class AmpAcpAgent {
     };
   }
 
+  // Backward-compatible alias for pre-0.13 ACP SDK method naming.
+  async listSessions(params = {}) {
+    return this.unstable_listSessions(params);
+  }
+
+  _getAvailableModels() {
+    return [{ modelId: 'default', name: 'Default', description: 'Amp default' }];
+  }
+
+  _getAvailableModes() {
+    return [
+      {
+        id: 'default',
+        name: 'Default',
+        description: 'Prompts for permission based on your amp.permissions settings',
+      },
+      {
+        id: 'acceptEdits',
+        name: 'Auto-accept File Changes',
+        description: 'Automatically allows file create/edit/delete without prompting',
+      },
+      {
+        id: 'bypassPermissions',
+        name: 'Bypass Permissions',
+        description: 'Skips all permission prompts (dangerouslyAllowAll)',
+      },
+      {
+        id: 'plan',
+        name: 'Plan Mode',
+        description: 'Read-only analysis mode - tools that modify files are disabled',
+      },
+    ];
+  }
+
+  _buildConfigOptions(sessionId) {
+    const s = this.sessions.get(sessionId);
+    if (!s) return [];
+
+    return [
+      {
+        id: 'mode',
+        name: 'Mode',
+        description: 'Choose how the agent should request permissions and execute tools',
+        category: 'mode',
+        type: 'select',
+        currentValue: s.currentModeId,
+        options: this._getAvailableModes().map((mode) => ({
+          value: mode.id,
+          name: mode.name,
+          description: mode.description,
+        })),
+      },
+      {
+        id: 'model',
+        name: 'Model',
+        description: 'Choose which model the agent should use',
+        category: 'model',
+        type: 'select',
+        currentValue: s.currentModelId,
+        options: this._getAvailableModels().map((model) => ({
+          value: model.modelId,
+          name: model.name,
+          description: model.description,
+        })),
+      },
+    ];
+  }
+
   /**
    * Build standard session response object.
    */
   _buildSessionResponse(sessionId) {
+    const s = this.sessions.get(sessionId);
+    const availableModels = this._getAvailableModels();
+    const availableModes = this._getAvailableModes();
+
     return {
       sessionId,
+      configOptions: this._buildConfigOptions(sessionId),
       models: {
-        currentModelId: 'default',
-        availableModels: [{ modelId: 'default', name: 'Default', description: 'Amp default' }],
+        currentModelId: s?.currentModelId || 'default',
+        availableModels,
       },
       modes: {
-        currentModeId: 'default',
-        availableModes: [
-          {
-            id: 'default',
-            name: 'Default',
-            description: 'Prompts for permission based on your amp.permissions settings',
-          },
-          {
-            id: 'acceptEdits',
-            name: 'Auto-accept File Changes',
-            description: 'Automatically allows file create/edit/delete without prompting',
-          },
-          {
-            id: 'bypassPermissions',
-            name: 'Bypass Permissions',
-            description: 'Skips all permission prompts (dangerouslyAllowAll)',
-          },
-          {
-            id: 'plan',
-            name: 'Plan Mode',
-            description: 'Read-only analysis mode - tools that modify files are disabled',
-          },
-        ],
+        currentModeId: s?.currentModeId || 'default',
+        availableModes,
       },
     };
   }
@@ -381,32 +465,116 @@ export class AmpAcpAgent {
     }
   }
 
+  async _emitConfigOptionsUpdate(sessionId) {
+    const s = this.sessions.get(sessionId);
+    if (!s) return;
+
+    try {
+      await this.client.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: 'config_option_update',
+          configOptions: this._buildConfigOptions(sessionId),
+        },
+      });
+    } catch (e) {
+      logProtocol.warn('Failed to emit config option update', { sessionId, error: e.message });
+    }
+  }
+
+  async _emitSessionInfoUpdate(sessionId) {
+    const s = this.sessions.get(sessionId);
+    if (!s) return;
+
+    try {
+      await this.client.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: 'session_info_update',
+          updatedAt: new Date(s.lastActivityAt || Date.now()).toISOString(),
+        },
+      });
+    } catch (e) {
+      logProtocol.warn('Failed to emit session info update', { sessionId, error: e.message });
+    }
+  }
+
   async authenticate(_params) {
     throw RequestError.authRequired();
   }
 
   async setSessionMode(params) {
     const s = this.sessions.get(params.sessionId);
-    if (s) {
-      s.currentModeId = params.modeId;
-      logSession.debug('Mode changed', { sessionId: params.sessionId, modeId: params.modeId });
-      try {
-        await this.client.sessionUpdate({
-          sessionId: params.sessionId,
-          update: {
-            sessionUpdate: 'current_mode_update',
-            currentModeId: params.modeId,
-          },
-        });
-      } catch (e) {
-        logProtocol.warn('Failed to emit mode update', { sessionId: params.sessionId, error: e.message });
-      }
+    if (!s) return {};
+
+    const availableModeIds = new Set(this._getAvailableModes().map((mode) => mode.id));
+    if (!availableModeIds.has(params.modeId)) {
+      throw new RequestError(-32602, `Invalid mode: ${params.modeId}`);
     }
+
+    s.currentModeId = params.modeId;
+    s.lastActivityAt = Date.now();
+    logSession.debug('Mode changed', { sessionId: params.sessionId, modeId: params.modeId });
+
+    try {
+      await this.client.sessionUpdate({
+        sessionId: params.sessionId,
+        update: {
+          sessionUpdate: 'current_mode_update',
+          currentModeId: params.modeId,
+        },
+      });
+    } catch (e) {
+      logProtocol.warn('Failed to emit mode update', { sessionId: params.sessionId, error: e.message });
+    }
+
+    await this._emitConfigOptionsUpdate(params.sessionId);
+    await this._emitSessionInfoUpdate(params.sessionId);
     return {};
   }
 
-  async setSessionModel(_params) {
+  async setSessionConfigOption(params) {
+    const s = this.sessions.get(params.sessionId);
+    if (!s) {
+      throw new RequestError(-32002, `Session not found: ${params.sessionId}`);
+    }
+
+    switch (params.configId) {
+      case 'mode':
+        await this.setSessionMode({ sessionId: params.sessionId, modeId: params.value });
+        break;
+      case 'model':
+        await this.unstable_setSessionModel({ sessionId: params.sessionId, modelId: params.value });
+        break;
+      default:
+        throw new RequestError(-32602, `Unknown config option: ${params.configId}`);
+    }
+
+    return {
+      configOptions: this._buildConfigOptions(params.sessionId),
+    };
+  }
+
+  async unstable_setSessionModel(params) {
+    const s = this.sessions.get(params.sessionId);
+    if (!s) return {};
+
+    const availableModelIds = new Set(this._getAvailableModels().map((model) => model.modelId));
+    if (!availableModelIds.has(params.modelId)) {
+      throw new RequestError(-32602, `Invalid model: ${params.modelId}`);
+    }
+
+    s.currentModelId = params.modelId;
+    s.lastActivityAt = Date.now();
+
+    await this._emitConfigOptionsUpdate(params.sessionId);
+    await this._emitSessionInfoUpdate(params.sessionId);
     return {};
+  }
+
+  // Backward-compatible alias for pre-0.13 ACP SDK method naming.
+  async setSessionModel(_params) {
+    return this.unstable_setSessionModel(_params);
   }
 
   /**
@@ -529,6 +697,7 @@ export class AmpAcpAgent {
     s.cancelled = false;
     s.active = true;
     s.lastActivityAt = Date.now(); // Update activity timestamp
+    this._emitSessionInfoUpdate(params.sessionId);
 
     // Log orphaned tool calls for debugging before clearing all
     const staleThreshold = Date.now() - config.staleToolTimeoutMs;
@@ -547,7 +716,7 @@ export class AmpAcpAgent {
     s.activeToolCalls.clear();
     s.nestedTracker.clear();
 
-    const cwd = s.loadedCwd || params.cwd || process.cwd();
+    const cwd = s.loadedCwd || params.cwd || s.cwd || process.cwd();
     let ampSettingsFile = null;
 
     if (!s.sentAvailableCommands) {

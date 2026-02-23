@@ -54,6 +54,7 @@ export function adaptSdkMessage(sdkMessage) {
         type: 'result',
         subtype: sdkMessage.subtype || (sdkMessage.is_error ? 'error_during_execution' : 'success'),
         result: sdkMessage.result,
+        usage: sdkMessage.usage,
         error: sdkMessage.is_error ? sdkMessage.result : undefined,
         is_error: sdkMessage.is_error,
       };
@@ -334,7 +335,15 @@ export function sdkMessageToAcpNotifications(
       }
       break;
 
-    case 'result':
+    case 'result': {
+      const usageUpdate = toAcpUsageUpdate(sdkMessage);
+      if (usageUpdate) {
+        output.push({
+          sessionId,
+          update: usageUpdate,
+        });
+      }
+
       if (
         sdkMessage.subtype === 'error_during_execution' ||
         sdkMessage.subtype === 'error_max_turns' ||
@@ -350,6 +359,7 @@ export function sdkMessageToAcpNotifications(
         });
       }
       break;
+    }
   }
   /* eslint-enable max-depth */
 
@@ -374,6 +384,84 @@ function toAcpContentArray(content, isError = false) {
 
 function wrapCode(t) {
   return '```\n' + t + '\n```';
+}
+
+function getNumericValue(obj, keys) {
+  if (!obj || typeof obj !== 'object') return null;
+
+  for (const key of keys) {
+    const value = obj[key];
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+  }
+  return null;
+}
+
+/**
+ * Extract ACP usage_update payload from an SDK result message.
+ * Supports both ACP-native shape ({size, used, cost}) and token-based shape
+ * ({input_tokens, output_tokens, total_tokens}).
+ *
+ * @param {object} sdkMessage - SDK result message
+ * @returns {object|null} ACP usage_update object or null when unavailable
+ */
+// eslint-disable-next-line complexity
+function toAcpUsageUpdate(sdkMessage) {
+  const usage =
+    sdkMessage?.usage && typeof sdkMessage.usage === 'object'
+      ? sdkMessage.usage
+      : sdkMessage?.result?.usage && typeof sdkMessage.result.usage === 'object'
+        ? sdkMessage.result.usage
+        : null;
+
+  if (!usage) return null;
+
+  let size = getNumericValue(usage, ['size', 'context_size', 'window_size']);
+  let used = getNumericValue(usage, ['used', 'context_used', 'used_tokens', 'total_tokens', 'totalTokens']);
+
+  if (used === null) {
+    const inputTokens = getNumericValue(usage, ['input_tokens', 'inputTokens']) || 0;
+    const outputTokens = getNumericValue(usage, ['output_tokens', 'outputTokens']) || 0;
+    const thoughtTokens = getNumericValue(usage, ['thought_tokens', 'thoughtTokens']) || 0;
+    const cachedReadTokens = getNumericValue(usage, ['cached_read_input_tokens', 'cachedReadTokens']) || 0;
+    const cachedWriteTokens = getNumericValue(usage, ['cached_write_input_tokens', 'cachedWriteTokens']) || 0;
+    const tokenSum = inputTokens + outputTokens + thoughtTokens + cachedReadTokens + cachedWriteTokens;
+
+    if (tokenSum > 0) {
+      used = tokenSum;
+    }
+  }
+
+  if (size === null && used !== null) {
+    size = used;
+  }
+
+  if (size === null || used === null) {
+    return null;
+  }
+
+  const usageUpdate = {
+    sessionUpdate: 'usage_update',
+    size,
+    used,
+  };
+
+  const cost = usage.cost;
+  if (cost && typeof cost === 'object') {
+    const amount = getNumericValue(cost, ['amount']);
+    const currency = typeof cost.currency === 'string' ? cost.currency : null;
+    if (amount !== null && currency) {
+      usageUpdate.cost = { amount, currency };
+    }
+  } else {
+    const amount = getNumericValue(usage, ['cost_usd', 'costUsd']);
+    if (amount !== null) {
+      usageUpdate.cost = { amount, currency: 'USD' };
+    }
+  }
+
+  return usageUpdate;
 }
 
 /**

@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `lastActivityAt` tracking on session state for activity-based sorting
 - `_createSessionState()` helper for consistent session initialization across newSession/loadSession/forkSession
 - `_emitNotifications()` helper for unified notification queueing in CLI and SDK message processing
+- ACP Session Config Options support (`setSessionConfigOption`) for `mode` and `model`
+- `configOptions` are now included in session responses (`newSession`, `loadSession`, `resumeSession`, `forkSession`)
+- ACP `session_info_update` notifications on session lifecycle and activity changes
+- ACP `usage_update` notifications from CLI/SDK result usage payloads
 
 ### Changed
 
@@ -25,8 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `AMP_ACP_CANCEL_GRACE_MS` (default: 2 sec) - process kill grace period
   - `AMP_ACP_CIRCUIT_BREAKER_THRESHOLD` (default: 5) - spawn failure threshold
   - `AMP_ACP_CIRCUIT_BREAKER_RESET_MS` (default: 30 sec) - circuit breaker reset time
+- Upgraded `@agentclientprotocol/sdk` from `0.11.0` to `0.14.1`
 - Refactored `prompt()` method: extracted `_processSlashCommands()` and `_buildFinalInput()` helpers
 - Refactored session state initialization to use shared `_createSessionState()` helper
+- Session state now tracks per-session `cwd` from `newSession` requests for consistent prompt/list behavior
+- `setSessionMode` and `setSessionModel` now validate requested values against advertised options
+- CI security audit now checks production dependencies (`npm audit --omit=dev --audit-level=high`) to avoid dev-tooling false positives
 
 ### Fixed
 
@@ -34,6 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Tool call ID collision**: Replaced timestamp-based IDs with `crypto.randomUUID()` for collision-proof uniqueness
 - **Promise chain error swallowing**: New `_queueSessionUpdate()` helper properly propagates critical errors and marks sessions as FAILED
 - Status transition validation now allows repeated terminal statuses for idempotent duplicate handling
+- **ACP SDK routing compatibility**: Added `unstable_resumeSession`, `unstable_forkSession`, `unstable_listSessions`, and `unstable_setSessionModel` handlers required by newer ACP SDK dispatch
+- **Session list capability parity**: `initialize()` now advertises `sessionCapabilities.list` and session list output includes ACP-required `cwd` and `updatedAt` fields
+- **Config option update parity**: mode/model changes now emit ACP `config_option_update` notifications
+- Added ACP SDK integration tests that exercise `session/resume`, `session/fork`, `session/list`, `session/set_model`, and `session/set_config_option` through `AgentSideConnection`
+- Added converter tests for ACP `usage_update` emission in both CLI and SDK adapter paths
 
 ## [0.3.0] - 2025-12-21
 
