@@ -53,7 +53,7 @@
   "devDependencies": {
     "@vitest/coverage-v8": "^4.0.16",
     "documentation": "^14.0.3",
-    "eslint": "^9.39.2",
+    "eslint": "^10.0.1",
     "eslint-config-prettier": "^10.1.8",
     "husky": "^9.1.7",
     "lint-staged": "^16.2.7",
